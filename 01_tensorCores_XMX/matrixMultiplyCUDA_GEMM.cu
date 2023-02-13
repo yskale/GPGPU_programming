@@ -57,6 +57,7 @@
 // }
 
 #define TILE_WIDTH 16
+#define N_REPEAT 100
 
 typedef float fp;
 
@@ -466,14 +467,17 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     //                             arrC, CUDA_R_32F, M,
     //                             CUDA_R_32F, CUBLAS_GEMM_DFALT_TENSOR_OP);
     transpose = false;
-    cublasGemmEx(cublasHandle, CUBLAS_OP_N, CUBLAS_OP_N,
-                                N, M, K,
-                                &alpha,
-                                arrB, CUDA_R_32F, N,
-                                arrA, CUDA_R_32F, K,
-                                &beta,
-                                arrC, CUDA_R_32F, N,
-                                CUDA_R_32F, CUBLAS_GEMM_DFALT_TENSOR_OP);
+    for (int i = 0; i < N_REPEAT; i++)
+    {
+        cublasGemmEx(cublasHandle, CUBLAS_OP_N, CUBLAS_OP_N,
+                     N, M, K,
+                     &alpha,
+                     arrB, CUDA_R_32F, N,
+                     arrA, CUDA_R_32F, K,
+                     &beta,
+                     arrC, CUDA_R_32F, N,
+                     CUDA_R_32F, CUBLAS_GEMM_DFALT_TENSOR_OP);
+    }
     __TIME_END
     cudaMemcpy(arrayC_h, arrC, M * N * sizeof(fp), cudaMemcpyDeviceToHost);
     if (!compare_matrix(arrayC_h, arrayC_href, M, N, transpose))
@@ -482,7 +486,7 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     }
     else
     {
-        printf("7. Pass, GPU calculation time (Gemm Tensor Cores) = %f ms\n", elapsedTime);
+        printf("7. Pass, GPU calculation time (Gemm Tensor Cores) = %f ms\n", elapsedTime/N_REPEAT);
     }
     cublasDestroy(cublasHandle);
 }

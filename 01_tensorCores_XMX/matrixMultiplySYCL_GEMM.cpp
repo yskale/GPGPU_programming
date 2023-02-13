@@ -17,9 +17,6 @@
 #include <cstring>
 #include <oneapi/mkl.hpp>
 #include <dpct/blas_utils.hpp>
-
-#include <chrono>
-
 #include <dpct/lib_common_utils.hpp>
 
 /*
@@ -79,6 +76,7 @@ measured depending on your goals.
 // }
 
 #define TILE_WIDTH 16
+#define N_REPEAT 100
 
 typedef float fp;
 
@@ -591,12 +589,15 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     //            dpct::library_data_t::real_float, M,
     //            dpct::library_data_t::real_float);
     transpose = false;
-    dpct::gemm(*cublasHandle, oneapi::mkl::transpose::nontrans,
-               oneapi::mkl::transpose::nontrans, N, M, K, &alpha, arrB,
-               dpct::library_data_t::real_float, N, arrA,
-               dpct::library_data_t::real_float, K, &beta, arrC,
-               dpct::library_data_t::real_float, N,
-               dpct::library_data_t::real_float);
+    for (int i = 0; i < N_REPEAT; i++)
+    {
+        dpct::gemm(*cublasHandle, oneapi::mkl::transpose::nontrans,
+                   oneapi::mkl::transpose::nontrans, N, M, K, &alpha, arrB,
+                   dpct::library_data_t::real_float, N, arrA,
+                   dpct::library_data_t::real_float, K, &beta, arrC,
+                   dpct::library_data_t::real_float, N,
+                   dpct::library_data_t::real_float);
+    }
     __TIME_END
     q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
     if (!compare_matrix(arrayC_h, arrayC_href, M, N, transpose))
@@ -605,7 +606,7 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     }
     else
     {
-        printf("7. Pass, GPU calculation time (Gemm Tensor Cores) = %f ms\n", elapsedTime);
+        printf("7. Pass, GPU calculation time (Gemm Tensor Cores) = %f ms\n", elapsedTime/N_REPEAT);
     }
     cublasHandle = nullptr;
 }
