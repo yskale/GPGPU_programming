@@ -5,7 +5,7 @@
 // =============================================================
 // haowei.zhang@intel.com
 
-// HPCSDK: nvc++ -acc -mp=gpu -gpu=cc70 -Minfo=all -I/usr/local/cuda/targets/x86_64-linux/include -L/usr/local/cuda/lib64 -lcublas matrixMultiplyCUDA_GEMM.cu
+// HPCSDK: nvc++ -acc -mp=gpu -gpu=cc70 -Minfo=all -I/usr/local/cuda/targets/x86_64-linux/include -L/usr/local/cuda/lib64 -lcublas matrixMultiplyCUDA_GEMM.cu // nvc++ not support for the WMMA due to incompatitable with -arch=sm_70
 // CUDA Toolkit: nvcc -arch=sm_70 -lcublas matrixMultiplyCUDA_GEMM.cu
 
 #include <iostream>
@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <cublas_v2.h>
+#include <mma.h>
 
 #define __TIME_BEGIN cudaEventRecord(start);
 #define __TIME_END              \
@@ -55,7 +56,7 @@
 //         fprintf(stderr, "cuRand Error: %d %s %d\n", stat, file, line);
 //     }
 // }
-
+// The only dimensions currently supported by WMMA, TILE_WIDTH,N,K = 16
 #define TILE_WIDTH 16
 #define N_REPEAT 100
 
@@ -84,6 +85,7 @@ void multiplyGpuShBcPd(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, i
 void multiplyGpuAcc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuOmp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyGpuWmma(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 
 int main()
 {
@@ -104,6 +106,8 @@ int main()
     multiplyGpuOmp(arrayA_h, arrayB_h, arrayC_h, M, K, N);
 
     multiplyGpuGemm(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+
+    multiplyGpuWmma(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     resources_free();
     return 0;
@@ -159,6 +163,7 @@ void print_matrix(const fp *arr, int M, int N)
 {
     for (int i = 0; i < M; i++)
     {
+        std::cout << "row " << i << ": ";
         for (int j = 0; j < N; j++)
         {
             std::cout << arr[i * N + j] << " ";
@@ -486,7 +491,122 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     }
     else
     {
-        printf("7. Pass, GPU calculation time (Gemm Tensor Cores) = %f ms\n", elapsedTime/N_REPEAT);
+        printf("7. Pass, GPU calculation time (Gemm Tensor Cores) = %f ms\n", elapsedTime / N_REPEAT);
     }
     cublasDestroy(cublasHandle);
+}
+
+__global__ void _fp2half(half *arrTgt, const fp *arrSrc, int M, int N)
+{
+    unsigned int row = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int col = blockDim.y * blockIdx.y + threadIdx.y;
+    unsigned int idx = row * N + col;
+    if (row < M && col < N)
+    {
+        arrTgt[idx] = arrSrc[idx];
+    }
+}
+
+__global__ void _matrixMulWmma(const half *arrA, const half *arrB, fp *arrC, int M, int K, int N, float alpha, float beta)
+{
+    // Leading dimensions. Packed with no transpositions. cols
+    int lda = M;
+    int ldb = K;
+    int ldc = M;
+
+    // Tile using a 2D grid
+    int warpM = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
+    int warpN = (blockIdx.y * blockDim.y + threadIdx.y);
+
+    // Declare the fragments
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, TILE_WIDTH, TILE_WIDTH, TILE_WIDTH, half, nvcuda::wmma::col_major> a_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, TILE_WIDTH, TILE_WIDTH, TILE_WIDTH, half, nvcuda::wmma::col_major> b_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, TILE_WIDTH, TILE_WIDTH, TILE_WIDTH, fp> acc_frag;
+    nvcuda::wmma::fragment<nvcuda::wmma::accumulator, TILE_WIDTH, TILE_WIDTH, TILE_WIDTH, fp> c_frag;
+
+    nvcuda::wmma::fill_fragment(acc_frag, 0.0f);
+
+    // Loop over k
+    for (int i = 0; i < K; i += TILE_WIDTH)
+    {
+        int aRow = warpM * TILE_WIDTH;
+        int aCol = i;
+
+        int bRow = i;
+        int bCol = warpN * TILE_WIDTH;
+
+        // Bounds checking
+        if (aRow < M && aCol < K && bRow < K && bCol < N)
+        {
+            // Load the inputs
+            nvcuda::wmma::load_matrix_sync(a_frag, arrA + aRow + aCol * lda, lda);
+            nvcuda::wmma::load_matrix_sync(b_frag, arrB + bRow + bCol * ldb, ldb);
+
+            // Perform the matrix multiplication
+            nvcuda::wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+        }
+    }
+
+    // Load in the current value of c, scale it by beta, and add this our result scaled by alpha
+    int cRow = warpM * TILE_WIDTH;
+    int cCol = warpN * TILE_WIDTH;
+
+    if (cRow < M && cCol < N)
+    {
+        nvcuda::wmma::load_matrix_sync(c_frag, arrC + cRow + cCol * ldc, ldc, nvcuda::wmma::mem_col_major);
+
+        for (int i = 0; i < c_frag.num_elements; i++)
+        {
+            c_frag.x[i] = alpha * acc_frag.x[i] + beta * c_frag.x[i];
+        }
+
+        // Store the output
+        nvcuda::wmma::store_matrix_sync(arrC + cRow + cCol * ldc, c_frag, ldc, nvcuda::wmma::mem_col_major);
+    }
+}
+
+void multiplyGpuWmma(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    half *arrAfp16;
+    half *arrBfp16;
+    cudaMalloc((void **)&arrAfp16, M * K * sizeof(half));
+    cudaMalloc((void **)&arrBfp16, K * N * sizeof(half));
+
+    dim3 dimBlockA(TILE_WIDTH, TILE_WIDTH, 1);
+    dim3 dimGridA((M + TILE_WIDTH - 1) / TILE_WIDTH, (K + TILE_WIDTH - 1) / TILE_WIDTH, 1);
+    _fp2half<<<dimGridA, dimBlockA>>>(arrAfp16, arrA, M, K);
+
+    dim3 dimBlockB(TILE_WIDTH, TILE_WIDTH, 1);
+    dim3 dimGridB((K + TILE_WIDTH - 1) / TILE_WIDTH, (N + TILE_WIDTH - 1) / TILE_WIDTH, 1);
+    _fp2half<<<dimGridB, dimBlockB>>>(arrBfp16, arrB, K, N);
+
+    result_reset();
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    bool transpose = false;
+
+    // blockDim.x must be a multple of warpSize
+    // 128x4 means we have 16 warps and a block computes a 64x64 output tile
+    const int warpSz = 32;
+    dim3 dimBlock(4 * warpSz, 4, 1);
+    dim3 dimGrid((N + (TILE_WIDTH * dimBlock.x / warpSz - 1)) / (TILE_WIDTH * dimBlock.x / warpSz), (M + TILE_WIDTH * dimBlock.y - 1) / (TILE_WIDTH * dimBlock.y), 1);
+
+    __TIME_BEGIN
+    for (int i = 0; i < N_REPEAT; i++)
+    {
+        _matrixMulWmma<<<dimGrid, dimBlock>>>(arrBfp16, arrAfp16, arrC, N, K, M, alpha, beta);
+    }
+    __TIME_END
+
+    cudaMemcpy(arrayC_h, arrC, M * N * sizeof(fp), cudaMemcpyDeviceToHost);
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N, transpose))
+    {
+        std::cout << "8. Error at multiplyGpuWmma" << std::endl;
+    }
+    else
+    {
+        printf("8. Pass, GPU calculation time (Wmma Tensor Cores) = %f ms\n", elapsedTime / N_REPEAT);
+    }
+    cudaFree(arrAfp16);
+    cudaFree(arrBfp16);
 }

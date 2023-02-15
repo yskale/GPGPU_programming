@@ -7,6 +7,8 @@
 
 // transfer from CUDA with DPCT: dpct --in-root=. --cuda-include-path=/usr/local/cuda-11.7/include matrixMultiplyCUDA.cu
 // clang++ -fsycl -fsycl-targets=nvptx64-nvidia-cuda -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_70 matrixMultiplySYCL.cpp
+// clang++ -fsycl -fsycl-targets=spir64_x86_64 matrixMultiplySYCL.cpp
+// clang++ -fsycl -fsycl-targets=spir64 matrixMultiplySYCL.cpp
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include <iostream>
@@ -60,6 +62,7 @@ bool compare_matrix(const fp *arr1, const fp *arr2, int M, int N);
 void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyGpuSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuShBcPd(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuAcc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
@@ -74,6 +77,8 @@ int main()
     multiplyGpu(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     multiplyGpuSh(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+
+    // multiplyGpuSh2(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     multiplyGpuShBc(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
@@ -92,6 +97,12 @@ void resources_init()
     std::cout << "Selected device: " << q_ct1.get_device().get_info<sycl::info::device::name>() << "\n";
     std::cout << "Device vendor: " << q_ct1.get_device().get_info<sycl::info::device::vendor>() << "\n";
     std::cout << "Max group/block size = " << q_ct1.get_device().get_info<sycl::info::device::max_work_group_size>() << "\n";
+    std::cout << "Shared Local Memory size = " << q_ct1.get_device().get_info<sycl::info::device::local_mem_size>() << " Bytes\n";
+    std::cout << "Sub-group Sizes: ";
+    for (const auto &s : q_ct1.get_device().get_info<sycl::info::device::sub_group_sizes>())
+        std::cout << s << " ";
+    std::cout << std::endl;
+
     arrayA_h = new fp[M * K]();
     arrayB_h = new fp[K * N]();
     arrayC_h = new fp[M * N]();
@@ -209,11 +220,6 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
                            (M + TILE_WIDTH - 1) / TILE_WIDTH);
 
     __TIME_BEGIN
-    /*
-    DPCT1049:0: The work-group size passed to the SYCL kernel may exceed the
-    limit. To get the device limit, query info::device::max_work_group_size.
-    Adjust the work-group size if needed.
-    */
     *stop =
         q_ct1.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
                            [=](sycl::nd_item<3> item_ct1)
@@ -270,17 +276,12 @@ void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N
                            (M + TILE_WIDTH - 1) / TILE_WIDTH);
 
     __TIME_BEGIN
-    /*
-    DPCT1049:1: The work-group size passed to the SYCL kernel may exceed the
-    limit. To get the device limit, query info::device::max_work_group_size.
-    Adjust the work-group size if needed.
-    */
     *stop = q_ct1.submit([&](sycl::handler &cgh)
                          {
         sycl::local_accessor<fp, 1> arrAs_acc_ct1(
-            sycl::range<1>(256 /*TILE_WIDTH * TILE_WIDTH*/), cgh);
+            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
         sycl::local_accessor<fp, 1> arrBs_acc_ct1(
-            sycl::range<1>(256 /*TILE_WIDTH * TILE_WIDTH*/), cgh);
+            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
 
         cgh.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
                          [=](sycl::nd_item<3> item_ct1) {
@@ -299,6 +300,68 @@ void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N
     else
     {
         printf("2. Pass, GPU calculation time (with shared memory) = %f ms\n", elapsedTime);
+    }
+}
+
+void _matrixMulSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
+                   sycl::nd_item<3> item_ct1, uint8_t *dpct_local)
+{
+    // absolute row and col
+    unsigned int row = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
+                       item_ct1.get_local_id(2);
+    unsigned int col = item_ct1.get_local_range(1) * item_ct1.get_group(1) +
+                       item_ct1.get_local_id(1);
+    auto arrAs = (fp *)dpct_local;
+    fp *arrBs =
+        arrAs + item_ct1.get_local_range(2) * item_ct1.get_local_range(1);
+    fp elementC = 0;
+
+    for (int i = 0; i < K / TILE_WIDTH; i++)
+    {
+        arrAs[item_ct1.get_local_id(1) * TILE_WIDTH +
+              item_ct1.get_local_id(2)] =
+            arrA[row * K + i * TILE_WIDTH + item_ct1.get_local_id(1)];
+        arrBs[item_ct1.get_local_id(1) * TILE_WIDTH +
+              item_ct1.get_local_id(2)] =
+            arrB[(i * TILE_WIDTH + item_ct1.get_local_id(2)) * N + col];
+        item_ct1.barrier(sycl::access::fence_space::local_space);
+        for (int k = 0; k < TILE_WIDTH; k++)
+            elementC += arrAs[k * TILE_WIDTH + item_ct1.get_local_id(2)] *
+                        arrBs[item_ct1.get_local_id(1) * TILE_WIDTH + k];
+        item_ct1.barrier(sycl::access::fence_space::local_space);
+    }
+    arrC[row * N + col] = elementC;
+}
+
+void multiplyGpuSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    result_reset();
+    sycl::range<3> dimBlock(1, TILE_WIDTH, TILE_WIDTH);
+    sycl::range<3> dimGrid(1, (N + TILE_WIDTH - 1) / TILE_WIDTH,
+                           (M + TILE_WIDTH - 1) / TILE_WIDTH);
+
+    __TIME_BEGIN
+    *stop = q_ct1.submit([&](sycl::handler &cgh)
+                         {
+        sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(
+            sycl::range<1>(TILE_WIDTH * TILE_WIDTH * sizeof(fp) * 2), cgh);
+
+        cgh.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
+                         [=](sycl::nd_item<3> item_ct1) {
+                             _matrixMulSh2(arrA, arrB, arrC, M, K, N, item_ct1,
+                                           dpct_local_acc_ct1.get_pointer());
+                         }); });
+    stop->wait();
+    __TIME_END
+
+    q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    {
+        std::cout << "2.1 Error at multiplyGpuSh2" << std::endl;
+    }
+    else
+    {
+        printf("2.1 Pass, GPU calculation time (with shared memory) = %f ms\n", elapsedTime);
     }
 }
 
@@ -338,17 +401,12 @@ void multiplyGpuShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
                            (M + TILE_WIDTH - 1) / TILE_WIDTH);
 
     __TIME_BEGIN
-    /*
-    DPCT1049:2: The work-group size passed to the SYCL kernel may exceed the
-    limit. To get the device limit, query info::device::max_work_group_size.
-    Adjust the work-group size if needed.
-    */
     *stop = q_ct1.submit([&](sycl::handler &cgh)
                          {
         sycl::local_accessor<fp, 1> arrAs_acc_ct1(
-            sycl::range<1>(256 /*TILE_WIDTH * TILE_WIDTH*/), cgh);
+            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
         sycl::local_accessor<fp, 1> arrBs_acc_ct1(
-            sycl::range<1>(256 /*TILE_WIDTH * TILE_WIDTH*/), cgh);
+            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
 
         cgh.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
                          [=](sycl::nd_item<3> item_ct1) {
@@ -406,17 +464,12 @@ void multiplyGpuShBcPd(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, i
                            (M + TILE_WIDTH - 1) / TILE_WIDTH);
 
     __TIME_BEGIN
-    /*
-    DPCT1049:3: The work-group size passed to the SYCL kernel may exceed the
-    limit. To get the device limit, query info::device::max_work_group_size.
-    Adjust the work-group size if needed.
-    */
     *stop = q_ct1.submit([&](sycl::handler &cgh)
                          {
         sycl::local_accessor<fp, 1> arrAs_acc_ct1(
-            sycl::range<1>(272 /*TILE_WIDTH * (TILE_WIDTH + 1)*/), cgh);
+            sycl::range<1>(TILE_WIDTH * (TILE_WIDTH + 1)), cgh);
         sycl::local_accessor<fp, 1> arrBs_acc_ct1(
-            sycl::range<1>(272 /*TILE_WIDTH * (TILE_WIDTH + 1)*/), cgh);
+            sycl::range<1>(TILE_WIDTH * (TILE_WIDTH + 1)), cgh);
 
         cgh.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
                          [=](sycl::nd_item<3> item_ct1) {

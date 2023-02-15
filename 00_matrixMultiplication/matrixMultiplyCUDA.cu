@@ -15,7 +15,7 @@
 
 #define __TIME_BEGIN cudaEventRecord(start);
 #define __TIME_END              \
-    cudaEventRecord(stop);   \
+    cudaEventRecord(stop);      \
     cudaEventSynchronize(stop); \
     cudaEventElapsedTime(&elapsedTime, start, stop);
 
@@ -41,6 +41,7 @@ bool compare_matrix(const fp *arr1, const fp *arr2, int M, int N);
 void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyGpuSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuShBcPd(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuAcc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
@@ -55,6 +56,8 @@ int main()
     multiplyGpu(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     multiplyGpuSh(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+
+    // multiplyGpuSh2(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     multiplyGpuShBc(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
@@ -236,6 +239,48 @@ void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N
     else
     {
         printf("2. Pass, GPU calculation time (with shared memory) = %f ms\n", elapsedTime);
+    }
+}
+
+__global__ void _matrixMulSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    // absolute row and col
+    unsigned int row = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int col = blockDim.y * blockIdx.y + threadIdx.y;
+    extern __shared__ fp arrAs[];
+    fp *arrBs = arrAs + blockDim.x * blockDim.y;
+    fp elementC = 0;
+
+    for (int i = 0; i < K / TILE_WIDTH; i++)
+    {
+        arrAs[threadIdx.y * TILE_WIDTH + threadIdx.x] = arrA[row * K + i * TILE_WIDTH + threadIdx.y];
+        arrBs[threadIdx.y * TILE_WIDTH + threadIdx.x] = arrB[(i * TILE_WIDTH + threadIdx.x) * N + col];
+        __syncthreads();
+        for (int k = 0; k < TILE_WIDTH; k++)
+            elementC += arrAs[k * TILE_WIDTH + threadIdx.x] * arrBs[threadIdx.y * TILE_WIDTH + k];
+        __syncthreads();
+    }
+    arrC[row * N + col] = elementC;
+}
+
+void multiplyGpuSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    result_reset();
+    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+    dim3 dimGrid((M + TILE_WIDTH - 1) / TILE_WIDTH, (N + TILE_WIDTH - 1) / TILE_WIDTH, 1);
+
+    __TIME_BEGIN
+    _matrixMulSh2<<<dimGrid, dimBlock, TILE_WIDTH * TILE_WIDTH * sizeof(fp) * 2>>>(arrA, arrB, arrC, M, K, N);
+    __TIME_END
+
+    cudaMemcpy(arrayC_h, arrC, M * N * sizeof(fp), cudaMemcpyDeviceToHost);
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    {
+        std::cout << "2.1 Error at multiplyGpuSh2" << std::endl;
+    }
+    else
+    {
+        printf("2.1 Pass, GPU calculation time (with shared memory) = %f ms\n", elapsedTime);
     }
 }
 
