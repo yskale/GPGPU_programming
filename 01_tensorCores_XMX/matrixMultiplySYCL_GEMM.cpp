@@ -135,6 +135,24 @@ int main()
 
 void resources_init()
 {
+    // https://www.intel.com/content/www/us/en/developer/articles/technical/device-discovery-with-sycl.html#gs.pmah8j
+    // for (auto platform : sycl::platform::get_platforms())
+    // {
+    //     std::cout << "Platform: "
+    //               << platform.get_info<sycl::info::platform::name>()
+    //               << std::endl;
+
+    //     for (auto device : platform.get_devices())
+    //     {
+    //         std::cout << "\tDevice: "
+    //                   << device.get_info<sycl::info::device::name>()
+    //                   << std::endl;
+    //     }
+    // }
+    
+    // auto platforms = sycl::platform::get_platforms();
+    // q_ct1 = sycl::queue(platforms[1].get_devices()[0]);
+
     std::cout << "Selected device: " << q_ct1.get_device().get_info<sycl::info::device::name>() << "\n";
     std::cout << "Device vendor: " << q_ct1.get_device().get_info<sycl::info::device::vendor>() << "\n";
     std::cout << "Max group/block size = " << q_ct1.get_device().get_info<sycl::info::device::max_work_group_size>() << "\n";
