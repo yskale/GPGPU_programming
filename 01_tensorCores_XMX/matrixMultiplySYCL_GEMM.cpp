@@ -149,7 +149,7 @@ void resources_init()
     //                   << std::endl;
     //     }
     // }
-    
+
     // auto platforms = sycl::platform::get_platforms();
     // q_ct1 = sycl::queue(platforms[1].get_devices()[0]);
 
@@ -589,8 +589,6 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     result_reset();
     float alpha = 1.0f;
     float beta = 0.0f;
-    sycl::queue *cublasHandle;
-    cublasHandle = &q_ct1;
     // Use tensor cores
     /*
     DPCT1026:6: The call to cublasSetMathMode was removed because this call is
@@ -600,7 +598,7 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     __TIME_BEGIN
     // Now using cuBLAS
     // transpose = true;
-    // dpct::gemm(*cublasHandle, oneapi::mkl::transpose::trans,
+    // dpct::gemm(q_ct1, oneapi::mkl::transpose::trans,
     //            oneapi::mkl::transpose::trans, M, N, K, &alpha, arrA,
     //            dpct::library_data_t::real_float, K, arrB,
     //            dpct::library_data_t::real_float, N, &beta, arrC,
@@ -609,13 +607,17 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     transpose = false;
     for (int i = 0; i < N_REPEAT; i++)
     {
-        dpct::gemm(*cublasHandle, oneapi::mkl::transpose::nontrans,
+        dpct::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
                    oneapi::mkl::transpose::nontrans, N, M, K, &alpha, arrB,
                    dpct::library_data_t::real_float, N, arrA,
                    dpct::library_data_t::real_float, K, &beta, arrC,
                    dpct::library_data_t::real_float, N,
                    dpct::library_data_t::real_float);
+        // oneapi::mkl::blas::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
+        //                         oneapi::mkl::transpose::nontrans,
+        //                         N, M, K, alpha, arrB, N, arrA, K, beta, arrC, N);
     }
+    q_ct1.wait();
     __TIME_END
     q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
     if (!compare_matrix(arrayC_h, arrayC_href, M, N, transpose))
@@ -624,7 +626,6 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     }
     else
     {
-        printf("7. Pass, GPU calculation time (Gemm Tensor Cores) = %f ms\n", elapsedTime/N_REPEAT);
+        printf("7. Pass, GPU calculation time (Gemm Tensor Cores) = %f ms\n", elapsedTime / N_REPEAT);
     }
-    cublasHandle = nullptr;
 }
