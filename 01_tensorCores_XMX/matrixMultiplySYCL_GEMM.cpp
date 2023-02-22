@@ -156,6 +156,12 @@ void resources_init()
     std::cout << "Selected device: " << q_ct1.get_device().get_info<sycl::info::device::name>() << "\n";
     std::cout << "Device vendor: " << q_ct1.get_device().get_info<sycl::info::device::vendor>() << "\n";
     std::cout << "Max group/block size = " << q_ct1.get_device().get_info<sycl::info::device::max_work_group_size>() << "\n";
+    std::cout << "Max Compute Units = " << q_ct1.get_device().get_info<sycl::info::device::max_compute_units>() << "\n";
+    std::cout << "Shared Local Memory size = " << q_ct1.get_device().get_info<sycl::info::device::local_mem_size>() << " Bytes\n";
+    std::cout << "Sub-group Sizes: ";
+    for (const auto &s : q_ct1.get_device().get_info<sycl::info::device::sub_group_sizes>())
+        std::cout << s << " ";
+    std::cout << std::endl;
     arrayA_h = new fp[M * K]();
     arrayB_h = new fp[K * N]();
     arrayC_h = new fp[M * N]();
@@ -189,10 +195,10 @@ void result_reset()
 
 void resources_free()
 {
-    delete arrayA_h;
-    delete arrayB_h;
-    delete arrayC_h;
-    delete arrayC_href;
+    delete[] arrayA_h;
+    delete[] arrayB_h;
+    delete[] arrayC_h;
+    delete[] arrayC_href;
     sycl::free(arrayA_d, q_ct1);
     sycl::free(arrayB_d, q_ct1);
     sycl::free(arrayC_d, q_ct1);

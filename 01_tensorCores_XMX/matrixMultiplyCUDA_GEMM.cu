@@ -148,10 +148,10 @@ void result_reset()
 
 void resources_free()
 {
-    delete arrayA_h;
-    delete arrayB_h;
-    delete arrayC_h;
-    delete arrayC_href;
+    delete[] arrayA_h;
+    delete[] arrayB_h;
+    delete[] arrayC_h;
+    delete[] arrayC_href;
     cudaFree(arrayA_d);
     cudaFree(arrayB_d);
     cudaFree(arrayC_d);

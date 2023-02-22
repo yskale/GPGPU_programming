@@ -6,6 +6,7 @@
 // haowei.zhang@intel.com
 
 // clang++ -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_70 --libomptarget-nvptx-bc-path=$DPCPP_HOME/llvm/build/install/lib matrixMultiplyLLVMOMP.cpp
+// clang++ -fiopenmp -fopenmp-targets=spir64 matrixMultiplyLLVMOMP.cpp
 // LLVM SYCL compiler required, ref: https://github.com/intel/llvm/discussions/3759
 #include <iostream>
 #include <chrono>
@@ -77,7 +78,6 @@ void resources_init()
 
     memset(arrayC_h, 0, M * N * sizeof(fp));
     memset(arrayC_href, 0, M * N * sizeof(fp));
-
 }
 
 void result_reset()
@@ -87,10 +87,10 @@ void result_reset()
 
 void resources_free()
 {
-    delete arrayA_h;
-    delete arrayB_h;
-    delete arrayC_h;
-    delete arrayC_href;
+    delete[] arrayA_h;
+    delete[] arrayB_h;
+    delete[] arrayC_h;
+    delete[] arrayC_href;
 }
 
 void print_matrix(const fp *arr, int M, int N)
