@@ -8,6 +8,7 @@
 // transfer from CUDA with DPCT: dpct --in-root=. --cuda-include-path=/usr/local/cuda-11.7/include matrixMultiplyCUDA.cu
 // run on CPU
 // icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core matrixMultiplySYCL_GEMM.cpp
+// icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core -fiopenmp -fopenmp-targets=spir64 matrixMultiplySYCL_GEMM.cpp
 // clang++ -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core matrixMultiplySYCL_GEMM.cpp
 // clang++ -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core -fiopenmp -fopenmp-targets=spir64 matrixMultiplySYCL_GEMM.cpp
 #include <sycl/sycl.hpp>

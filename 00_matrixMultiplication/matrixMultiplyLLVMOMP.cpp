@@ -5,13 +5,16 @@
 // =============================================================
 // haowei.zhang@intel.com
 
-// clang++ -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_70 --libomptarget-nvptx-bc-path=$DPCPP_HOME/llvm/build/install/lib matrixMultiplyLLVMOMP.cpp
-// clang++ -fiopenmp -fopenmp-targets=spir64 matrixMultiplyLLVMOMP.cpp
+// icpx -fiopenmp -fopenmp-targets=spir64 matrixMultiplyLLVMOMP.cpp
+// clang++ -fiopenmp -fopenmp-targets=spir64 -I${oneAPIHome}/compiler/latest/linux/compiler/include/ matrixMultiplyLLVMOMP.cpp
+// (use the opensource compiler) clang++ -fopenmp -fopenmp-targets=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_70 --libomptarget-nvptx-bc-path=$DPCPP_HOME/llvm/build/install/lib -I${oneAPIHome}/compiler/latest/linux/compiler/include/ matrixMultiplyLLVMOMP.cpp
 // LLVM SYCL compiler required, ref: https://github.com/intel/llvm/discussions/3759
+// nvc++ -acc -mp=gpu -gpu=cc70 -Minfo=all matrixMultiplyLLVMOMP.cpp
 #include <iostream>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <omp.h>
 /*
 DPCT1012:4: Detected kernel execution time measurement pattern and generated an
 initial code for time measurements in SYCL. You can change the way time is
@@ -80,6 +83,8 @@ void resources_init()
 
     memset(arrayC_h, 0, M * N * sizeof(fp));
     memset(arrayC_href, 0, M * N * sizeof(fp));
+    printf("There are %d devices\n", omp_get_num_devices());
+    omp_set_default_device(0);
 }
 
 void result_reset()

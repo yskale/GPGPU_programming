@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <omp.h>
 
 #define __TIME_BEGIN cudaEventRecord(start);
 #define __TIME_END              \
@@ -96,6 +97,8 @@ void resources_init()
     cudaMemset(arrayC_d, 0, M * N * sizeof(fp));
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
+    printf("There are %d OpenMP devices\n", omp_get_num_devices());
+    omp_set_default_device(0);
 }
 
 void result_reset()
