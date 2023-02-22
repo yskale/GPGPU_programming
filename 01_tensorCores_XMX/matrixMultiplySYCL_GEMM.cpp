@@ -9,6 +9,7 @@
 // run on CPU
 // icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core matrixMultiplySYCL_GEMM.cpp
 // clang++ -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core matrixMultiplySYCL_GEMM.cpp
+// clang++ -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core -fiopenmp -fopenmp-targets=spir64 matrixMultiplySYCL_GEMM.cpp
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include <iostream>
@@ -76,7 +77,8 @@ measured depending on your goals.
 // }
 
 #define TILE_WIDTH 16
-#define N_REPEAT 100
+#define SUB_GRP_SZ 32
+#define N_REPEAT 10000
 
 typedef float fp;
 
@@ -101,6 +103,7 @@ void resources_free();
 void print_matrix(const fp *arr, int M, int N);
 bool compare_matrix(const fp *arr1, const fp *arr2, int M, int N, bool transpose = false);
 void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void warmupGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
@@ -279,8 +282,42 @@ void _matrixMul(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
     }
 }
 
+void warmupGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    result_reset();
+    sycl::range<3> dimBlock(1, TILE_WIDTH, TILE_WIDTH);
+    sycl::range<3> dimGrid(1, (N + TILE_WIDTH - 1) / TILE_WIDTH,
+                           (M + TILE_WIDTH - 1) / TILE_WIDTH);
+
+    __TIME_BEGIN
+    *stop =
+        q_ct1.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
+                           [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(SUB_GRP_SZ)]]
+                           {
+                               _matrixMul(arrA, arrB, arrC, M, K, N, item_ct1);
+                           });
+    stop->wait();
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    dpct::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
+               oneapi::mkl::transpose::nontrans, N, M, K, &alpha, arrB,
+               dpct::library_data_t::real_float, N, arrA,
+               dpct::library_data_t::real_float, K, &beta, arrC,
+               dpct::library_data_t::real_float, N,
+               dpct::library_data_t::real_float);
+    q_ct1.wait();
+    result_reset();
+
+    __TIME_END
+
+    // printf("0. warmupGpu time = %f ms\n", elapsedTime);
+}
+
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
 {
+    warmupGpu(arrA, arrB, arrC, M, K, N);
     result_reset();
     sycl::range<3> dimBlock(1, TILE_WIDTH, TILE_WIDTH);
     sycl::range<3> dimGrid(1, (N + TILE_WIDTH - 1) / TILE_WIDTH,
@@ -294,7 +331,7 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     */
     *stop =
         q_ct1.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
-                           [=](sycl::nd_item<3> item_ct1)
+                           [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(SUB_GRP_SZ)]]
                            {
                                _matrixMul(arrA, arrB, arrC, M, K, N, item_ct1);
                            });

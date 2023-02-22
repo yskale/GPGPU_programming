@@ -58,7 +58,7 @@
 // }
 // The only dimensions currently supported by WMMA, TILE_WIDTH,N,K = 16
 #define TILE_WIDTH 16
-#define N_REPEAT 100
+#define N_REPEAT 10000
 
 typedef float fp;
 

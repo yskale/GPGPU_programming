@@ -36,6 +36,7 @@ measured depending on your goals.
         std::chrono::duration<float, std::milli>(stop_ct1 - start_ct1).count();
 
 #define TILE_WIDTH 16
+#define SUB_GRP_SZ 32
 
 typedef float fp;
 
@@ -60,6 +61,7 @@ void resources_free();
 void print_matrix(const fp *arr, int M, int N);
 bool compare_matrix(const fp *arr1, const fp *arr2, int M, int N);
 void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void warmupGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
@@ -231,7 +233,7 @@ void _matrixMul(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
     }
 }
 
-void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+void warmupGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
 {
     result_reset();
     sycl::range<3> dimBlock(1, TILE_WIDTH, TILE_WIDTH);
@@ -241,7 +243,28 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     __TIME_BEGIN
     *stop =
         q_ct1.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
-                           [=](sycl::nd_item<3> item_ct1)
+                           [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(SUB_GRP_SZ)]]
+                           {
+                               _matrixMul(arrA, arrB, arrC, M, K, N, item_ct1);
+                           });
+    stop->wait();
+    __TIME_END
+
+    // printf("0. warmupGpu time = %f ms\n", elapsedTime);
+}
+
+void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    warmupGpu(arrA, arrB, arrC, M, K, N);
+    result_reset();
+    sycl::range<3> dimBlock(1, TILE_WIDTH, TILE_WIDTH);
+    sycl::range<3> dimGrid(1, (N + TILE_WIDTH - 1) / TILE_WIDTH,
+                           (M + TILE_WIDTH - 1) / TILE_WIDTH);
+
+    __TIME_BEGIN
+    *stop =
+        q_ct1.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
+                           [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(SUB_GRP_SZ)]]
                            {
                                _matrixMul(arrA, arrB, arrC, M, K, N, item_ct1);
                            });

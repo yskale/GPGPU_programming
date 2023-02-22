@@ -59,6 +59,8 @@ int main()
 
     multiplyGpuOmp(arrayA_h, arrayB_h, arrayC_h, M, K, N);
 
+    multiplyGpuOmp(arrayA_h, arrayB_h, arrayC_h, M, K, N);
+
     resources_free();
     return 0;
 }
