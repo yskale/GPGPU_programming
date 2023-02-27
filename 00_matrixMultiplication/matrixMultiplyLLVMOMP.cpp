@@ -161,14 +161,17 @@ void multiplyGpuOmp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int 
 #pragma omp target enter data map(to \
                                   : arrA [0:M * K], arrB [0:K * N], arrC [0:M * N])
     __TIME_BEGIN
-#pragma omp target teams distribute parallel for collapse(2)
-    for (int i = 0; i < M; i++)
+#pragma omp target data use_device_ptr(arrA, arrB, arrC)
     {
-        for (int j = 0; j < N; j++)
+#pragma omp target teams distribute parallel for collapse(2)
+        for (int i = 0; i < M; i++)
         {
-            for (int k = 0; k < K; k++)
+            for (int j = 0; j < N; j++)
             {
-                arrC[i * N + j] += arrA[i * K + k] * arrB[k * N + j];
+                for (int k = 0; k < K; k++)
+                {
+                    arrC[i * N + j] += arrA[i * K + k] * arrB[k * N + j];
+                }
             }
         }
     }

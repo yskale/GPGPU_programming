@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cublas_v2.h>
 #include <mma.h>
+// #include <omp.h>
 
 #define __TIME_BEGIN cudaEventRecord(start);
 #define __TIME_END              \
@@ -138,6 +139,8 @@ void resources_init()
     cudaMemset(arrayC_d, 0, M * N * sizeof(fp));
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
+    // printf("There are %d OpenMP devices\n", omp_get_num_devices());
+    // omp_set_default_device(0);
 }
 
 void result_reset()
@@ -222,19 +225,23 @@ void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
 __global__ void _matrixMul(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
 {
     // absolute row and col
-    unsigned int row = blockDim.x * blockIdx.x + threadIdx.x;
-    unsigned int col = blockDim.y * blockIdx.y + threadIdx.y;
-    for (int k = 0; k < K; k++)
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int row = idx / N;
+    unsigned int col = idx % N;
+    if (row < M && col < N)
     {
-        arrC[row * N + col] += arrA[row * K + k] * arrB[k * N + col];
+        for (int k = 0; k < K; k++)
+        {
+            arrC[row * N + col] += arrA[row * K + k] * arrB[k * N + col];
+        }
     }
 }
 
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
 {
     result_reset();
-    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
-    dim3 dimGrid((M + TILE_WIDTH - 1) / TILE_WIDTH, (N + TILE_WIDTH - 1) / TILE_WIDTH, 1);
+    dim3 dimBlock(TILE_WIDTH * TILE_WIDTH, 1, 1);
+    dim3 dimGrid((M * N + dimBlock.x - 1) / dimBlock.x, 1, 1);
 
     __TIME_BEGIN
     _matrixMul<<<dimGrid, dimBlock>>>(arrA, arrB, arrC, M, K, N);
@@ -256,20 +263,28 @@ __global__ void _matrixMulSh(const fp *arrA, const fp *arrB, fp *arrC, int M, in
     // absolute row and col
     unsigned int row = blockDim.x * blockIdx.x + threadIdx.x;
     unsigned int col = blockDim.y * blockIdx.y + threadIdx.y;
+
     __shared__ fp arrAs[TILE_WIDTH * TILE_WIDTH];
     __shared__ fp arrBs[TILE_WIDTH * TILE_WIDTH];
     fp elementC = 0;
 
-    for (int i = 0; i < K / TILE_WIDTH; i++)
+    for (int i = 0; i < (K + TILE_WIDTH - 1) / TILE_WIDTH; i++)
     {
-        arrAs[threadIdx.y * TILE_WIDTH + threadIdx.x] = arrA[row * K + i * TILE_WIDTH + threadIdx.y];
-        arrBs[threadIdx.y * TILE_WIDTH + threadIdx.x] = arrB[(i * TILE_WIDTH + threadIdx.x) * N + col];
+        if (i * TILE_WIDTH + threadIdx.y < K)
+            arrAs[threadIdx.y * TILE_WIDTH + threadIdx.x] = arrA[row * K + i * TILE_WIDTH + threadIdx.y];
+        else
+            arrAs[threadIdx.y * TILE_WIDTH + threadIdx.x] = 0;
+        if (i * TILE_WIDTH + threadIdx.x < K)
+            arrBs[threadIdx.y * TILE_WIDTH + threadIdx.x] = arrB[(i * TILE_WIDTH + threadIdx.x) * N + col];
+        else
+            arrBs[threadIdx.y * TILE_WIDTH + threadIdx.x] = 0;
         __syncthreads();
         for (int k = 0; k < TILE_WIDTH; k++)
             elementC += arrAs[k * TILE_WIDTH + threadIdx.x] * arrBs[threadIdx.y * TILE_WIDTH + k];
         __syncthreads();
     }
-    arrC[row * N + col] = elementC;
+    if (row < M && col < N)
+        arrC[row * N + col] = elementC;
 }
 
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
@@ -302,16 +317,23 @@ __global__ void _matrixMulShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, 
     __shared__ fp arrBs[TILE_WIDTH * TILE_WIDTH];
     fp elementC = 0;
 
-    for (int i = 0; i < K / TILE_WIDTH; i++)
+    for (int i = 0; i < (K + TILE_WIDTH - 1) / TILE_WIDTH; i++)
     {
-        arrAs[threadIdx.x * TILE_WIDTH + threadIdx.y] = arrA[row * K + i * TILE_WIDTH + threadIdx.y];
-        arrBs[threadIdx.x * TILE_WIDTH + threadIdx.y] = arrB[(i * TILE_WIDTH + threadIdx.x) * N + col];
+        if (i * TILE_WIDTH + threadIdx.y < K)
+            arrAs[threadIdx.x * TILE_WIDTH + threadIdx.y] = arrA[row * K + i * TILE_WIDTH + threadIdx.y];
+        else
+            arrAs[threadIdx.x * TILE_WIDTH + threadIdx.y] = 0;
+        if (i * TILE_WIDTH + threadIdx.x < K)
+            arrBs[threadIdx.x * TILE_WIDTH + threadIdx.y] = arrB[(i * TILE_WIDTH + threadIdx.x) * N + col];
+        else
+            arrBs[threadIdx.x * TILE_WIDTH + threadIdx.y] = 0;
         __syncthreads();
         for (int k = 0; k < TILE_WIDTH; k++)
             elementC += arrAs[threadIdx.x * TILE_WIDTH + k] * arrBs[k * TILE_WIDTH + threadIdx.y];
         __syncthreads();
     }
-    arrC[row * N + col] = elementC;
+    if (row < M && col < N)
+        arrC[row * N + col] = elementC;
 }
 
 void multiplyGpuShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
@@ -344,16 +366,23 @@ __global__ void _matrixMulShBcPd(const fp *arrA, const fp *arrB, fp *arrC, int M
     __shared__ fp arrBs[TILE_WIDTH * (TILE_WIDTH + 1)];
     fp elementC = 0;
 
-    for (int i = 0; i < K / TILE_WIDTH; i++)
+    for (int i = 0; i < (K + TILE_WIDTH - 1) / TILE_WIDTH; i++)
     {
-        arrAs[threadIdx.x * (TILE_WIDTH + 1) + threadIdx.y] = arrA[row * K + i * TILE_WIDTH + threadIdx.y];
-        arrBs[threadIdx.x * (TILE_WIDTH + 1) + threadIdx.y] = arrB[(i * TILE_WIDTH + threadIdx.x) * N + col];
+        if (i * TILE_WIDTH + threadIdx.y < K)
+            arrAs[threadIdx.x * (TILE_WIDTH + 1) + threadIdx.y] = arrA[row * K + i * TILE_WIDTH + threadIdx.y];
+        else
+            arrAs[threadIdx.x * (TILE_WIDTH + 1) + threadIdx.y] = 0;
+        if (i * TILE_WIDTH + threadIdx.x < K)
+            arrBs[threadIdx.x * (TILE_WIDTH + 1) + threadIdx.y] = arrB[(i * TILE_WIDTH + threadIdx.x) * N + col];
+        else
+            arrBs[threadIdx.x * (TILE_WIDTH + 1) + threadIdx.y] = 0;
         __syncthreads();
         for (int k = 0; k < TILE_WIDTH; k++)
             elementC += arrAs[threadIdx.x * (TILE_WIDTH + 1) + k] * arrBs[k * (TILE_WIDTH + 1) + threadIdx.y];
         __syncthreads();
     }
-    arrC[row * N + col] = elementC;
+    if (row < M && col < N)
+        arrC[row * N + col] = elementC;
 }
 
 void multiplyGpuShBcPd(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
@@ -422,14 +451,17 @@ void multiplyGpuOmp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int 
 #pragma omp target enter data map(to \
                                   : arrA [0:M * K], arrB [0:K * N], arrC [0:M * N])
     __TIME_BEGIN
-#pragma omp target teams distribute parallel for collapse(2)
-    for (int i = 0; i < M; i++)
+#pragma omp target data use_device_ptr(arrA, arrB, arrC)
     {
-        for (int j = 0; j < N; j++)
+#pragma omp target teams distribute parallel for collapse(2)
+        for (int i = 0; i < M; i++)
         {
-            for (int k = 0; k < K; k++)
+            for (int j = 0; j < N; j++)
             {
-                arrC[i * N + j] += arrA[i * K + k] * arrB[k * N + j];
+                for (int k = 0; k < K; k++)
+                {
+                    arrC[i * N + j] += arrA[i * K + k] * arrB[k * N + j];
+                }
             }
         }
     }

@@ -273,22 +273,24 @@ void _matrixMul(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
                 sycl::nd_item<3> item_ct1)
 {
     // absolute row and col
-    unsigned int row = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
-                       item_ct1.get_local_id(2);
-    unsigned int col = item_ct1.get_local_range(1) * item_ct1.get_group(1) +
-                       item_ct1.get_local_id(1);
-    for (int k = 0; k < K; k++)
+    int idx = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
+              item_ct1.get_local_id(2);
+    unsigned int row = idx / N;
+    unsigned int col = idx % N;
+    if (row < M && col < N)
     {
-        arrC[row * N + col] += arrA[row * K + k] * arrB[k * N + col];
+        for (int k = 0; k < K; k++)
+        {
+            arrC[row * N + col] += arrA[row * K + k] * arrB[k * N + col];
+        }
     }
 }
 
 void warmupGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
 {
     result_reset();
-    sycl::range<3> dimBlock(1, TILE_WIDTH, TILE_WIDTH);
-    sycl::range<3> dimGrid(1, (N + TILE_WIDTH - 1) / TILE_WIDTH,
-                           (M + TILE_WIDTH - 1) / TILE_WIDTH);
+    sycl::range<3> dimBlock(1, 1, TILE_WIDTH * TILE_WIDTH);
+    sycl::range<3> dimGrid(1, 1, (N * M + dimBlock[2] - 1) / dimBlock[2]);
 
     __TIME_BEGIN
     *stop =
@@ -320,9 +322,8 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
 {
     warmupGpu(arrA, arrB, arrC, M, K, N);
     result_reset();
-    sycl::range<3> dimBlock(1, TILE_WIDTH, TILE_WIDTH);
-    sycl::range<3> dimGrid(1, (N + TILE_WIDTH - 1) / TILE_WIDTH,
-                           (M + TILE_WIDTH - 1) / TILE_WIDTH);
+    sycl::range<3> dimBlock(1, 1, TILE_WIDTH * TILE_WIDTH);
+    sycl::range<3> dimGrid(1, 1, (N * M + dimBlock[2] - 1) / dimBlock[2]);
 
     __TIME_BEGIN
     /*
@@ -361,21 +362,30 @@ void _matrixMulSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
 
     fp elementC = 0;
 
-    for (int i = 0; i < K / TILE_WIDTH; i++)
+    for (int i = 0; i < (K + TILE_WIDTH - 1) / TILE_WIDTH; i++)
     {
-        arrAs[item_ct1.get_local_id(1) * TILE_WIDTH +
-              item_ct1.get_local_id(2)] =
-            arrA[row * K + i * TILE_WIDTH + item_ct1.get_local_id(1)];
-        arrBs[item_ct1.get_local_id(1) * TILE_WIDTH +
-              item_ct1.get_local_id(2)] =
-            arrB[(i * TILE_WIDTH + item_ct1.get_local_id(2)) * N + col];
+        if (i * TILE_WIDTH + item_ct1.get_local_id(1) < K)
+            arrAs[item_ct1.get_local_id(1) * TILE_WIDTH +
+                  item_ct1.get_local_id(2)] =
+                arrA[row * K + i * TILE_WIDTH + item_ct1.get_local_id(1)];
+        else
+            arrAs[item_ct1.get_local_id(1) * TILE_WIDTH +
+                  item_ct1.get_local_id(2)] = 0;
+        if (i * TILE_WIDTH + item_ct1.get_local_id(2) < K)
+            arrBs[item_ct1.get_local_id(1) * TILE_WIDTH +
+                  item_ct1.get_local_id(2)] =
+                arrB[(i * TILE_WIDTH + item_ct1.get_local_id(2)) * N + col];
+        else
+            arrBs[item_ct1.get_local_id(1) * TILE_WIDTH +
+                  item_ct1.get_local_id(2)] = 0;
         item_ct1.barrier(sycl::access::fence_space::local_space);
         for (int k = 0; k < TILE_WIDTH; k++)
             elementC += arrAs[k * TILE_WIDTH + item_ct1.get_local_id(2)] *
                         arrBs[item_ct1.get_local_id(1) * TILE_WIDTH + k];
         item_ct1.barrier(sycl::access::fence_space::local_space);
     }
-    arrC[row * N + col] = elementC;
+    if (row < M && col < N)
+        arrC[row * N + col] = elementC;
 }
 
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
@@ -429,21 +439,30 @@ void _matrixMulShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int 
 
     fp elementC = 0;
 
-    for (int i = 0; i < K / TILE_WIDTH; i++)
+    for (int i = 0; i < (K + TILE_WIDTH - 1) / TILE_WIDTH; i++)
     {
-        arrAs[item_ct1.get_local_id(2) * TILE_WIDTH +
-              item_ct1.get_local_id(1)] =
-            arrA[row * K + i * TILE_WIDTH + item_ct1.get_local_id(1)];
-        arrBs[item_ct1.get_local_id(2) * TILE_WIDTH +
-              item_ct1.get_local_id(1)] =
-            arrB[(i * TILE_WIDTH + item_ct1.get_local_id(2)) * N + col];
+        if (i * TILE_WIDTH + item_ct1.get_local_id(1) < K)
+            arrAs[item_ct1.get_local_id(2) * TILE_WIDTH +
+                  item_ct1.get_local_id(1)] =
+                arrA[row * K + i * TILE_WIDTH + item_ct1.get_local_id(1)];
+        else
+            arrAs[item_ct1.get_local_id(2) * TILE_WIDTH +
+                  item_ct1.get_local_id(1)] = 0;
+        if (i * TILE_WIDTH + item_ct1.get_local_id(2) < K)
+            arrBs[item_ct1.get_local_id(2) * TILE_WIDTH +
+                  item_ct1.get_local_id(1)] =
+                arrB[(i * TILE_WIDTH + item_ct1.get_local_id(2)) * N + col];
+        else
+            arrBs[item_ct1.get_local_id(2) * TILE_WIDTH +
+                  item_ct1.get_local_id(1)] = 0;
         item_ct1.barrier(sycl::access::fence_space::local_space);
         for (int k = 0; k < TILE_WIDTH; k++)
             elementC += arrAs[item_ct1.get_local_id(2) * TILE_WIDTH + k] *
                         arrBs[k * TILE_WIDTH + item_ct1.get_local_id(1)];
         item_ct1.barrier(sycl::access::fence_space::local_space);
     }
-    arrC[row * N + col] = elementC;
+    if (row < M && col < N)
+        arrC[row * N + col] = elementC;
 }
 
 void multiplyGpuShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
@@ -497,21 +516,30 @@ void _matrixMulShBcPd(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, in
 
     fp elementC = 0;
 
-    for (int i = 0; i < K / TILE_WIDTH; i++)
+    for (int i = 0; i < (K + TILE_WIDTH - 1) / TILE_WIDTH; i++)
     {
-        arrAs[item_ct1.get_local_id(2) * (TILE_WIDTH + 1) +
-              item_ct1.get_local_id(1)] =
-            arrA[row * K + i * TILE_WIDTH + item_ct1.get_local_id(1)];
-        arrBs[item_ct1.get_local_id(2) * (TILE_WIDTH + 1) +
-              item_ct1.get_local_id(1)] =
-            arrB[(i * TILE_WIDTH + item_ct1.get_local_id(2)) * N + col];
+        if (i * TILE_WIDTH + item_ct1.get_local_id(1) < K)
+            arrAs[item_ct1.get_local_id(2) * (TILE_WIDTH + 1) +
+                  item_ct1.get_local_id(1)] =
+                arrA[row * K + i * TILE_WIDTH + item_ct1.get_local_id(1)];
+        else
+            arrAs[item_ct1.get_local_id(2) * (TILE_WIDTH + 1) +
+                  item_ct1.get_local_id(1)] = 0;
+        if (i * TILE_WIDTH + item_ct1.get_local_id(2) < K)
+            arrBs[item_ct1.get_local_id(2) * (TILE_WIDTH + 1) +
+                  item_ct1.get_local_id(1)] =
+                arrB[(i * TILE_WIDTH + item_ct1.get_local_id(2)) * N + col];
+        else
+            arrBs[item_ct1.get_local_id(2) * (TILE_WIDTH + 1) +
+                  item_ct1.get_local_id(1)] = 0;
         item_ct1.barrier(sycl::access::fence_space::local_space);
         for (int k = 0; k < TILE_WIDTH; k++)
             elementC += arrAs[item_ct1.get_local_id(2) * (TILE_WIDTH + 1) + k] *
                         arrBs[k * (TILE_WIDTH + 1) + item_ct1.get_local_id(1)];
         item_ct1.barrier(sycl::access::fence_space::local_space);
     }
-    arrC[row * N + col] = elementC;
+    if (row < M && col < N)
+        arrC[row * N + col] = elementC;
 }
 
 void multiplyGpuShBcPd(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
