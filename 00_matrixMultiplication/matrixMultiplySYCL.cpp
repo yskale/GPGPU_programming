@@ -62,6 +62,8 @@ void print_matrix(const fp *arr, int M, int N);
 bool compare_matrix(const fp *arr1, const fp *arr2, int M, int N);
 void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void warmupGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyGpuGrp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
@@ -77,6 +79,10 @@ int main()
     multiplyCpu(arrayA_h, arrayB_h, arrayC_href, M, K, N);
 
     multiplyGpu(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+
+    multiplyGpuGrp(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+
+    multiplyGpuGrpSh(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     multiplyGpuSh(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
@@ -487,6 +493,153 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     else
     {
         printf("1. Pass, GPU calculation time (without shared memory order 7) = %f ms\n", elapsedTime);
+    }
+}
+
+#define GRP_METHOD1
+
+void _matrixMulGrp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
+                   sycl::group<3> grp, sycl::h_item<3> item_ct1)
+{
+    // absolute row and col
+#ifdef GRP_METHOD1
+    // method 1
+    unsigned int row = grp.get_group_id(0) * grp.get_local_range(0) +
+                       item_ct1.get_logical_local_id(0);
+    unsigned int col = grp.get_group_id(1) * grp.get_local_range(1) +
+                       item_ct1.get_logical_local_id(1);
+#else
+    // method 2
+    unsigned int row = grp.get_group_id(0) * item_ct1.get_local_range(0) +
+                       item_ct1.get_logical_local_id(0);
+    unsigned int col = grp.get_group_id(1) * item_ct1.get_local_range(1) +
+                       item_ct1.get_logical_local_id(1);
+#endif
+
+    if (row < M && col < N)
+    {
+        for (int k = 0; k < K; k++)
+        {
+            arrC[row * N + col] += arrA[row * K + k] * arrB[k * N + col];
+        }
+    }
+}
+
+void multiplyGpuGrp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    result_reset();
+    sycl::range<3> dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+    sycl::range<3> dimGrid((M + TILE_WIDTH - 1) / TILE_WIDTH,
+                           (N + TILE_WIDTH - 1) / TILE_WIDTH, 1);
+
+    __TIME_BEGIN
+#ifdef GRP_METHOD1
+    // method 1
+    *stop = q_ct1.submit([&](sycl::handler &cgh)
+                         { cgh.parallel_for_work_group(dimGrid, dimBlock, [=](sycl::group<3> grp)
+                                                       { grp.parallel_for_work_item([&](sycl::h_item<3> item_ct1)
+                                                                                    { _matrixMulGrp(arrA, arrB, arrC, M, K, N, grp, item_ct1); }); }); });
+#else
+    // method 2
+    *stop = q_ct1.submit([&](sycl::handler &cgh)
+                         { cgh.parallel_for_work_group(dimGrid, dimBlock, [=](sycl::group<3> grp)
+                                                       { grp.parallel_for_work_item(dimBlock, [&](sycl::h_item<3> item_ct1)
+                                                                                    { _matrixMulGrp(arrA, arrB, arrC, M, K, N, grp, item_ct1); }); }); });
+    // below case is very slow without the optional parameter dimBlock in parallel_for_work_group, though the result is correct
+    // *stop = q_ct1.submit([&](sycl::handler &cgh)
+    //                      { cgh.parallel_for_work_group(dimGrid, [=](sycl::group<3> grp)
+    //                                                    { grp.parallel_for_work_item(dimBlock, [&](sycl::h_item<3> item_ct1)
+    //                                                                                 { _matrixMulGrp(arrA, arrB, arrC, M, K, N, grp, item_ct1); }); }); });
+#endif
+
+    stop->wait();
+    __TIME_END
+
+    q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    {
+        std::cout << "1. Error at multiplyGpuGrp" << std::endl;
+    }
+    else
+    {
+        printf("1. Pass, GPU calculation time (without shared memory, with Grp) = %f ms\n", elapsedTime);
+    }
+}
+
+void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    result_reset();
+    sycl::range<3> dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+    sycl::range<3> dimGrid((M + TILE_WIDTH - 1) / TILE_WIDTH,
+                           (N + TILE_WIDTH - 1) / TILE_WIDTH, 1);
+
+    __TIME_BEGIN
+
+    // method 1
+    *stop = q_ct1.submit([&](sycl::handler &cgh)
+                         { 
+        sycl::local_accessor<fp, 1> arrAs_acc_ct1(
+            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
+        sycl::local_accessor<fp, 1> arrBs_acc_ct1(
+            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
+
+        cgh.parallel_for_work_group(dimGrid, dimBlock, [=](sycl::group<3> grp)
+        {    
+            fp *arrAs = arrAs_acc_ct1.get_pointer();
+            fp *arrBs = arrBs_acc_ct1.get_pointer();
+
+            for (int i = 0; i < (K + TILE_WIDTH - 1) / TILE_WIDTH; i++)
+            {
+                grp.parallel_for_work_item([&](sycl::h_item<3> item_ct1) 
+                {                 
+                    unsigned int row = grp.get_group_id(0) * grp.get_local_range(0) +
+                                    item_ct1.get_logical_local_id(0);
+                    unsigned int col = grp.get_group_id(1) * grp.get_local_range(1) +
+                                    item_ct1.get_logical_local_id(1);
+                    if (i * TILE_WIDTH + item_ct1.get_logical_local_id(1) < K)
+                        arrAs[item_ct1.get_logical_local_id(1) * TILE_WIDTH +
+                            item_ct1.get_logical_local_id(0)] =
+                            arrA[row * K + i * TILE_WIDTH + item_ct1.get_logical_local_id(1)];
+                    else
+                        arrAs[item_ct1.get_logical_local_id(1) * TILE_WIDTH +
+                            item_ct1.get_logical_local_id(0)] = 0;
+                    if (i * TILE_WIDTH + item_ct1.get_logical_local_id(0) < K)
+                        arrBs[item_ct1.get_logical_local_id(1) * TILE_WIDTH +
+                            item_ct1.get_logical_local_id(0)] =
+                            arrB[(i * TILE_WIDTH + item_ct1.get_logical_local_id(0)) * N + col];
+                    else
+                        arrBs[item_ct1.get_logical_local_id(1) * TILE_WIDTH +
+                            item_ct1.get_logical_local_id(0)] = 0; 
+                });
+
+                grp.parallel_for_work_item([&](sycl::h_item<3> item_ct1) 
+                { 
+                    unsigned int row = grp.get_group_id(0) * grp.get_local_range(0) +
+                                    item_ct1.get_logical_local_id(0);
+                    unsigned int col = grp.get_group_id(1) * grp.get_local_range(1) +
+                                    item_ct1.get_logical_local_id(1);
+                    if (row < M && col < N)
+                    {
+                        for (int k = 0; k < TILE_WIDTH; k++)
+                            arrC[row * N + col] += arrAs[k * TILE_WIDTH + item_ct1.get_logical_local_id(0)] *
+                                                arrBs[item_ct1.get_logical_local_id(1) * TILE_WIDTH + k];
+                    }
+                });
+            }                
+        }); 
+    });
+
+    stop->wait();
+    __TIME_END
+
+    q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    {
+        std::cout << "1. Error at multiplyGpuGrpSh" << std::endl;
+    }
+    else
+    {
+        printf("1. Pass, GPU calculation time (without shared memory, with GrpSh) = %f ms\n", elapsedTime);
     }
 }
 
