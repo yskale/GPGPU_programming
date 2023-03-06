@@ -164,6 +164,7 @@ void multiplyGpuOmp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int 
 #pragma omp target data use_device_ptr(arrA, arrB, arrC)
     {
 #pragma omp target teams distribute parallel for collapse(2)
+// #pragma omp target teams loop order(concurrent) collapse(2)
         for (int i = 0; i < M; i++)
         {
             for (int j = 0; j < N; j++)

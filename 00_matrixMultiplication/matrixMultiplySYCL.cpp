@@ -40,9 +40,15 @@ measured depending on your goals.
 
 typedef float fp;
 
-static int M = 2048;
-static int K = 1024;
-static int N = 512;
+// const int M = 16;
+// const int K = 16;
+// const int N = 16;
+const int M = 2048;
+const int K = 1024;
+const int N = 512;
+constexpr int rangeMK = M * K;
+constexpr int rangeKN = K * N;
+constexpr int rangeMN = M * N;
 
 fp *arrayA_h, *arrayB_h, *arrayC_h, *arrayC_href;
 fp *arrayA_d, *arrayB_d, *arrayC_d;
@@ -52,6 +58,7 @@ std::chrono::time_point<std::chrono::steady_clock> stop_ct1;
 
 dpct::device_ext &dev_ct1 = dpct::get_current_device();
 sycl::queue &q_ct1 = dev_ct1.default_queue();
+// sycl::usm_allocator<fp, sycl::usm::alloc::shared> alloc(q_ct1);
 
 float elapsedTime;
 
@@ -60,8 +67,9 @@ void result_reset();
 void resources_free();
 void print_matrix(const fp *arr, int M, int N);
 bool compare_matrix(const fp *arr1, const fp *arr2, int M, int N);
-void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void warmupGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyGpuAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuGrp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
@@ -79,6 +87,9 @@ int main()
     multiplyCpu(arrayA_h, arrayB_h, arrayC_href, M, K, N);
 
     multiplyGpu(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+
+    // multiplyGpuAccessor(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+    multiplyGpuAccessor(arrayA_h, arrayB_h, arrayC_h, M, K, N);
 
     multiplyGpuGrp(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
@@ -138,6 +149,15 @@ void resources_init()
     arrayA_d = sycl::malloc_device<fp>(M * K, q_ct1);
     arrayB_d = sycl::malloc_device<fp>(K * N, q_ct1);
     arrayC_d = sycl::malloc_device<fp>(M * N, q_ct1);
+    // arrayC_d = sycl::malloc_host<fp>(M * N, q_ct1);
+    // arrayC_d = sycl::malloc_shared<fp>(M * N, q_ct1);
+    // arrayC_d = sycl::malloc_device<fp>(M * N, q_ct1.get_device(), q_ct1.get_context());
+    // arrayC_d = sycl::aligned_alloc_device<fp>(32, M * N, q_ct1); // 4-, 8-, 16-, or 32-byte aligned
+    // arrayC_d = sycl::malloc<fp>(M * N, q_ct1, sycl::usm::alloc::device); // device, shared, host
+    // arrayC_d = sycl::aligned_alloc<fp>(32, M * N, q_ct1, sycl::usm::alloc::device); // device, shared, host
+    // arrayC_d = static_cast<fp*>(sycl::malloc(M * N * sizeof(fp), q_ct1, sycl::usm::alloc::device)); // device, shared, host
+    // arrayC_d = static_cast<fp*>(sycl::malloc_device(M * N * sizeof(fp), q_ct1));
+    // fp *arrayC_d = alloc.allocate(M * N);
 
     for (int i = 0; i < M * K; i++)
         arrayA_h[i] = rand() / (fp)RAND_MAX * 1.0;
@@ -151,6 +171,7 @@ void resources_init()
     q_ct1.memcpy(arrayA_d, arrayA_h, M * K * sizeof(fp));
     q_ct1.memcpy(arrayB_d, arrayB_h, K * N * sizeof(fp)).wait();
     q_ct1.memset(arrayC_d, 0, M * N * sizeof(fp)).wait();
+    // q_ct1.fill<float>(arrayC_d, 0.0f, M * N).wait();
     start = new sycl::event();
     stop = new sycl::event();
 }
@@ -170,6 +191,7 @@ void resources_free()
     sycl::free(arrayA_d, q_ct1);
     sycl::free(arrayB_d, q_ct1);
     sycl::free(arrayC_d, q_ct1);
+    // alloc.deallocate(arrayC_d, M * N);
     dpct::destroy_event(start);
     dpct::destroy_event(stop);
 }
@@ -496,6 +518,65 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     }
 }
 
+void _matrixMulAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N, sycl::nd_item<3> item_ct1)
+{
+    // absolute row and col
+    int idx = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
+              item_ct1.get_local_id(2);
+    unsigned int row = idx / N;
+    unsigned int col = idx % N;
+
+    if (row < M && col < N)
+    {
+        for (int k = 0; k < K; k++)
+        {
+            arrC[row * N + col] += arrA[row * K + k] * arrB[k * N + col];
+        }
+    }
+}
+
+void multiplyGpuAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    result_reset();
+    sycl::range<3> dimBlock(1, 1, TILE_WIDTH * TILE_WIDTH);
+    sycl::range<3> dimGrid(1, 1, (N * M + dimBlock[2] - 1) / dimBlock[2]);
+
+    sycl::buffer<fp> arrAbuf{arrA, sycl::range{rangeMK}};
+    sycl::buffer<fp> arrBbuf{arrB, sycl::range{rangeKN}};
+    sycl::buffer<fp> arrCbuf{arrC, sycl::range{rangeMN}};
+    // sycl::accessor arrAacc{arrAbuf, sycl::read_only};
+    // sycl::accessor arrBacc{arrBbuf, sycl::read_only};
+    // sycl::accessor arrCacc{arrCbuf, sycl::write_only};
+    __TIME_BEGIN
+    *stop = q_ct1.submit([&](sycl::handler &cgh)
+                         {
+                            // cgh.require(arrAacc);
+                            // cgh.require(arrBacc);
+                            // cgh.require(arrCacc);
+        sycl::accessor arrAacc{arrAbuf, cgh, sycl::read_only};
+        sycl::accessor arrBacc{arrBbuf, cgh, sycl::read_only};
+        sycl::accessor arrCacc{arrCbuf, cgh, sycl::write_only};
+        cgh.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
+                         [=](sycl::nd_item<3> item_ct1)
+                         {
+                             _matrixMulAccessor(arrAacc.get_pointer(), arrBacc.get_pointer(), arrCacc.get_pointer(), M, K, N,
+                                                item_ct1);
+                         }); });
+    stop->wait();
+    __TIME_END
+
+    // q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
+    sycl::host_accessor h_arrCacc{arrCbuf};
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    {
+        std::cout << "1. Error at multiplyGpuAccessor" << std::endl;
+    }
+    else
+    {
+        printf("1. Pass, GPU calculation time (without shared memory, with buffer + accessor) = %f ms\n", elapsedTime);
+    }
+}
+
 #define GRP_METHOD1
 
 void _matrixMulGrp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
@@ -626,8 +707,7 @@ void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, in
                     }
                 });
             }                
-        }); 
-    });
+        }); });
 
     stop->wait();
     __TIME_END
@@ -639,7 +719,7 @@ void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, in
     }
     else
     {
-        printf("1. Pass, GPU calculation time (without shared memory, with GrpSh) = %f ms\n", elapsedTime);
+        printf("1. Pass, GPU calculation time (with shared memory, with GrpSh) = %f ms\n", elapsedTime);
     }
 }
 
@@ -977,6 +1057,7 @@ void multiplyGpuOmp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int 
                                   : arrA [0:M * K], arrB [0:K * N], arrC [0:M * N])
     __TIME_BEGIN
 #pragma omp target teams distribute parallel for collapse(2)
+    // #pragma omp target teams loop order(concurrent) collapse(2)
     for (int i = 0; i < M; i++)
     {
         for (int j = 0; j < N; j++)
