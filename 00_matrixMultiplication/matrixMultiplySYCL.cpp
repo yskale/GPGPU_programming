@@ -72,6 +72,7 @@ void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuGrp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyGpuBcast(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
@@ -88,12 +89,13 @@ int main()
 
     multiplyGpu(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
-    // multiplyGpuAccessor(arrayA_d, arrayB_d, arrayC_d, M, K, N);
     multiplyGpuAccessor(arrayA_h, arrayB_h, arrayC_h, M, K, N);
 
     multiplyGpuGrp(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     multiplyGpuGrpSh(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+
+    multiplyGpuBcast(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     multiplyGpuSh(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
@@ -528,10 +530,12 @@ void _matrixMulAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, 
 
     if (row < M && col < N)
     {
+        fp sum = 0;
         for (int k = 0; k < K; k++)
         {
-            arrC[row * N + col] += arrA[row * K + k] * arrB[k * N + col];
+            sum += arrA[row * K + k] * arrB[k * N + col];
         }
+        arrC[row * N + col] = sum;
     }
 }
 
@@ -555,7 +559,7 @@ void multiplyGpuAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K,
                             // cgh.require(arrCacc);
         sycl::accessor arrAacc{arrAbuf, cgh, sycl::read_only};
         sycl::accessor arrBacc{arrBbuf, cgh, sycl::read_only};
-        sycl::accessor arrCacc{arrCbuf, cgh, sycl::write_only};
+        sycl::accessor arrCacc{arrCbuf, cgh, sycl::write_only, sycl::no_init};
         cgh.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
                          [=](sycl::nd_item<3> item_ct1)
                          {
@@ -565,7 +569,6 @@ void multiplyGpuAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K,
     stop->wait();
     __TIME_END
 
-    // q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
     sycl::host_accessor h_arrCacc{arrCbuf};
     if (!compare_matrix(arrayC_h, arrayC_href, M, N))
     {
@@ -659,18 +662,21 @@ void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, in
     // method 1
     *stop = q_ct1.submit([&](sycl::handler &cgh)
                          { 
-        sycl::local_accessor<fp, 1> arrAs_acc_ct1(
-            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
-        sycl::local_accessor<fp, 1> arrBs_acc_ct1(
-            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
+        // sycl::local_accessor<fp, 1> arrAs_acc_ct1(
+        //     sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
+        // sycl::local_accessor<fp, 1> arrBs_acc_ct1(
+        //     sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
 
         cgh.parallel_for_work_group(dimGrid, dimBlock, [=](sycl::group<3> grp)
         {    
-            fp *arrAs = arrAs_acc_ct1.get_pointer();
-            fp *arrBs = arrBs_acc_ct1.get_pointer();
+            // fp *arrAs = arrAs_acc_ct1.get_pointer();
+            // fp *arrBs = arrBs_acc_ct1.get_pointer();
+            fp arrAs[TILE_WIDTH * TILE_WIDTH];
+            fp arrBs[TILE_WIDTH * TILE_WIDTH];
 
             for (int i = 0; i < (K + TILE_WIDTH - 1) / TILE_WIDTH; i++)
             {
+                // implicit barrier
                 grp.parallel_for_work_item([&](sycl::h_item<3> item_ct1) 
                 {                 
                     unsigned int row = grp.get_group_id(0) * grp.get_local_range(0) +
@@ -692,6 +698,7 @@ void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, in
                         arrBs[item_ct1.get_logical_local_id(1) * TILE_WIDTH +
                             item_ct1.get_logical_local_id(0)] = 0; 
                 });
+                // implicit barrier
 
                 grp.parallel_for_work_item([&](sycl::h_item<3> item_ct1) 
                 { 
@@ -723,6 +730,56 @@ void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, in
     }
 }
 
+void _matrixMulBcast(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
+                     sycl::nd_item<2> item_ct1)
+{
+    // absolute row and col
+    unsigned int row = item_ct1.get_local_range(0) * item_ct1.get_group(0) +
+                       item_ct1.get_local_id(0);
+    unsigned int col = item_ct1.get_local_range(1) * item_ct1.get_group(1) +
+                       item_ct1.get_local_id(1);
+
+    fp elementC = 0;
+    auto sg = item_ct1.get_sub_group();
+    for (int i = 0; i < K; i += TILE_WIDTH)
+    {
+        fp tileA = arrA[row * K + i + item_ct1.get_local_id(1)];
+        for (int k = 0; k < TILE_WIDTH; k++)
+            elementC += sycl::group_broadcast(sg, tileA, k) * arrB[(i + k) * N + col];
+            // elementC += arrA[row * K + i + k] * arrB[(i + k) * N + col]; // the speed is the same as above one in CUDA_BACKEND, perhaps the broadcast mechanism is automatically triggered.
+    }
+    if (row < M && col < N)
+        arrC[row * N + col] = elementC;
+}
+
+void multiplyGpuBcast(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    result_reset();
+    sycl::range<2> dimBlock(1, TILE_WIDTH);
+    sycl::range<2> dimGrid(M, (N + TILE_WIDTH - 1) / TILE_WIDTH);
+
+    __TIME_BEGIN
+    *stop = q_ct1.submit([&](sycl::handler &cgh)
+                         { cgh.parallel_for(sycl::nd_range<2>(dimGrid * dimBlock, dimBlock),
+                                            [=](sycl::nd_item<2> item_ct1) [[intel::reqd_sub_group_size(SUB_GRP_SZ)]]
+                                            // SUB_GRP_SZ >= TILE_WIDTH, so as to cover the whole stencil
+                                            {
+                                                _matrixMulBcast(arrA, arrB, arrC, M, K, N, item_ct1);
+                                            }); });
+    stop->wait();
+    __TIME_END
+
+    q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    {
+        std::cout << "1. Error at multiplyGpuBcast" << std::endl;
+    }
+    else
+    {
+        printf("1. Pass, GPU calculation time (without shared memory, with bcast) = %f ms\n", elapsedTime);
+    }
+}
+
 void _matrixMulSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
                   sycl::nd_item<3> item_ct1, fp *arrAs, fp *arrBs)
 {
@@ -751,10 +808,12 @@ void _matrixMulSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N,
             arrBs[item_ct1.get_local_id(1) * TILE_WIDTH +
                   item_ct1.get_local_id(2)] = 0;
         item_ct1.barrier(sycl::access::fence_space::local_space);
+        // item_ct1.barrier();
         for (int k = 0; k < TILE_WIDTH; k++)
             elementC += arrAs[k * TILE_WIDTH + item_ct1.get_local_id(2)] *
                         arrBs[item_ct1.get_local_id(1) * TILE_WIDTH + k];
         item_ct1.barrier(sycl::access::fence_space::local_space);
+        // item_ct1.barrier();
     }
     if (row < M && col < N)
         arrC[row * N + col] = elementC;
@@ -772,6 +831,8 @@ void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N
                          {
         sycl::local_accessor<fp, 1> arrAs_acc_ct1(
             sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
+        // sycl::accessor<fp, 1, sycl::access::mode::read_write, sycl::access::target::local> arrAs_acc_ct1(
+            // sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
         sycl::local_accessor<fp, 1> arrBs_acc_ct1(
             sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
 
