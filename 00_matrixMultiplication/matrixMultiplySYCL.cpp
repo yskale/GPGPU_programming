@@ -116,19 +116,38 @@ int main()
 void resources_init()
 {
     // https://www.intel.com/content/www/us/en/developer/articles/technical/device-discovery-with-sycl.html#gs.pmah8j
-    // for (auto platform : sycl::platform::get_platforms())
-    // {
-    //     std::cout << "Platform: "
-    //               << platform.get_info<sycl::info::platform::name>()
-    //               << std::endl;
-
-    //     for (auto device : platform.get_devices())
-    //     {
-    //         std::cout << "\tDevice: "
-    //                   << device.get_info<sycl::info::device::name>()
-    //                   << std::endl;
-    //     }
-    // }
+    int numPlatform = 0;
+    for (auto const &platform : sycl::platform::get_platforms())
+    {
+        std::cout << "Platform[" << numPlatform++ << "]: "
+                  << platform.get_info<sycl::info::platform::name>()
+                  << std::endl;
+        std::cout << "\tVendor: " << platform.get_info<sycl::info::platform::vendor>()
+                  << std::endl;
+        std::cout << "\tVersion: " << platform.get_info<sycl::info::platform::version>()
+                  << std::endl;
+        std::cout << "\tProfile: " << platform.get_info<sycl::info::platform::profile>()
+                  << std::endl;
+        for (auto device : platform.get_devices())
+        {
+            std::cout << "\tDevice: " << device.get_info<sycl::info::device::name>()
+                      << "\n\t\tType -> is_cpu: " << (device.is_cpu() ? "true" : "false")
+                      << "\n\t\tType -> is_gpu: " << (device.is_gpu() ? "true" : "false")
+                      << "\n\t\tType -> is_accelerator: " << (device.is_accelerator() ? "true" : "false")
+                      << "\n\t\tVendor: " << device.get_info<sycl::info::device::vendor>()
+                      << "\n\t\tDriver: " << device.get_info<sycl::info::device::driver_version>()
+                      << "\n\t\tMem_base_addr_align: " << device.get_info<sycl::info::device::mem_base_addr_align>()
+                      << "\n\t\tLocal_mem_size: " << device.get_info<sycl::info::device::local_mem_size>()
+                      << "\n\t\tPartition_max_sub_devices: " << device.get_info<sycl::info::device::partition_max_sub_devices>()
+                      << "\n\t\tMax_compute_units: " << device.get_info<sycl::info::device::max_compute_units>()
+                      << "\n\t\tMax_work_item_dimensions: " << device.get_info<sycl::info::device::max_work_item_dimensions>()
+                      << "\n\t\tMax_work_group/block_size: " << device.get_info<sycl::info::device::max_work_group_size>()
+                      << "\n\t\tSub_group_sizes: ";
+            for (const auto &s : device.get_info<sycl::info::device::sub_group_sizes>())
+                std::cout << s << " ";
+            std::cout << std::endl;
+        }
+    }
 
     // auto platforms = sycl::platform::get_platforms();
     // q_ct1 = sycl::queue(platforms[2].get_devices()[0]);
@@ -333,6 +352,33 @@ void warmupGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     // printf("0. warmupGpu time = %f ms\n", elapsedTime);
 }
 
+class matrixMulFunc
+{
+private:
+    const fp *arrA;
+    const fp *arrB;
+    fp *arrC;
+    int M, K, N;
+
+public:
+    matrixMulFunc(const fp *arr_A, const fp *arr_B, fp *arr_C, int m, int k, int n) : arrA(arr_A), arrB(arr_B), arrC(arr_C), M(m), K(k), N(n) {}
+    void operator()(sycl::nd_item<3> item_ct1) const // the object of class matrixMulFunc will be const in parallel_for
+    {
+        // _matrixMul(arrA, arrB, arrC, M, K, N, 7, item_ct1);
+        int idx = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
+                  item_ct1.get_local_id(2);
+        int row = idx / N;
+        int col = idx % N;
+        if (row < M && col < N)
+        {
+            for (int k = 0; k < K; k++)
+            {
+                arrC[row * N + col] += arrA[row * K + k] * arrB[k * N + col];
+            }
+        }
+    }
+};
+
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
 {
     warmupGpu(arrA, arrB, arrC, M, K, N);
@@ -517,6 +563,27 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     else
     {
         printf("1. Pass, GPU calculation time (without shared memory order 7) = %f ms\n", elapsedTime);
+    }
+
+    // use functor, order 7
+    result_reset();
+    dimBlock = sycl::range<3>(1, 1, TILE_WIDTH * TILE_WIDTH);
+    dimGrid = sycl::range<3>(1, 1, (N * M + dimBlock[2] - 1) / dimBlock[2]);
+
+    __TIME_BEGIN
+    *stop = q_ct1.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
+                               matrixMulFunc(arrA, arrB, arrC, M, K, N));
+    stop->wait();
+    __TIME_END
+
+    q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    {
+        std::cout << "1. Error at multiplyGpu order 7 (functor)" << std::endl;
+    }
+    else
+    {
+        printf("1. Pass, GPU calculation time (without shared memory order 7, functor) = %f ms\n", elapsedTime);
     }
 }
 
@@ -746,7 +813,7 @@ void _matrixMulBcast(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
         fp tileA = arrA[row * K + i + item_ct1.get_local_id(1)];
         for (int k = 0; k < TILE_WIDTH; k++)
             elementC += sycl::group_broadcast(sg, tileA, k) * arrB[(i + k) * N + col];
-            // elementC += arrA[row * K + i + k] * arrB[(i + k) * N + col]; // the speed is the same as above one in CUDA_BACKEND, perhaps the broadcast mechanism is automatically triggered.
+        // elementC += arrA[row * K + i + k] * arrB[(i + k) * N + col]; // the speed is the same as above one in CUDA_BACKEND, perhaps the broadcast mechanism is automatically triggered.
     }
     if (row < M && col < N)
         arrC[row * N + col] = elementC;
