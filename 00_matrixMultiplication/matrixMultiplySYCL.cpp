@@ -113,7 +113,7 @@ int main()
     return 0;
 }
 
-// #define LIST_ALL_DEVICES
+#define LIST_ALL_DEVICES
 void resources_init()
 {
     // https://www.intel.com/content/www/us/en/developer/articles/technical/device-discovery-with-sycl.html#gs.pmah8j
@@ -153,18 +153,21 @@ void resources_init()
                       << "\n\t\tMax_work_group/block_size: " << device.get_info<sycl::info::device::max_work_group_size>()
                       << "\n\t\tGlobal_mem_cache_line_size: " << device.get_info<sycl::info::device::global_mem_cache_line_size>()
                       << "\n\t\tGlobal_mem_cache_size: " << device.get_info<sycl::info::device::global_mem_cache_size>()
-                      << "\n\t\tLocal_mem_type: " << static_cast<int>(device.get_info<sycl::info::device::local_mem_type>())
+                      << "\n\t\tLocal_mem_type_enum {none(0), local(1), global(2)}: " << static_cast<int>(device.get_info<sycl::info::device::local_mem_type>())
                       << "\n\t\tSub_group_sizes: ";
             for (const auto &s : device.get_info<sycl::info::device::sub_group_sizes>())
                 std::cout << s << " ";
 
-            std::cout << "\n\t\tAtomic_memory_order_capabilities: ";
+            std::cout << "\n\t\tAtomic_memory_order_capabilities_enum {relaxed(0), acquire(1), "
+                      << "\n\t\t\t__consume_unsupported(2), release(3), acq_rel(4), seq_cst(5)}: ";
             for (const auto &s : device.get_info<sycl::info::device::atomic_memory_order_capabilities>())
                 std::cout << static_cast<int>(s) << " ";
 
-            std::cout << "\n\t\tAtomic_memory_scope_capabilities: ";
+            std::cout << "\n\t\tAtomic_memory_scope_capabilities_enum {work_item(0), sub_group(1), "
+                      << "\n\t\t\twork_group(2), device(3), system(4)}: ";
             for (const auto &s : device.get_info<sycl::info::device::atomic_memory_scope_capabilities>())
                 std::cout << static_cast<int>(s) << " ";
+
             std::cout << std::endl;
         }
     }
