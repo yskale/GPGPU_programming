@@ -113,9 +113,11 @@ int main()
     return 0;
 }
 
+// #define LIST_ALL_DEVICES
 void resources_init()
 {
     // https://www.intel.com/content/www/us/en/developer/articles/technical/device-discovery-with-sycl.html#gs.pmah8j
+#ifdef LIST_ALL_DEVICES
     int numPlatform = 0;
     for (auto const &platform : sycl::platform::get_platforms())
     {
@@ -128,26 +130,45 @@ void resources_init()
                   << std::endl;
         std::cout << "\tProfile: " << platform.get_info<sycl::info::platform::profile>()
                   << std::endl;
+        int numDevice = 0;
         for (auto device : platform.get_devices())
         {
-            std::cout << "\tDevice: " << device.get_info<sycl::info::device::name>()
+            std::cout << "\tDevice[" << numDevice++ << "]: " << device.get_info<sycl::info::device::name>()
                       << "\n\t\tType -> is_cpu: " << (device.is_cpu() ? "true" : "false")
                       << "\n\t\tType -> is_gpu: " << (device.is_gpu() ? "true" : "false")
                       << "\n\t\tType -> is_accelerator: " << (device.is_accelerator() ? "true" : "false")
                       << "\n\t\tVendor: " << device.get_info<sycl::info::device::vendor>()
                       << "\n\t\tDriver: " << device.get_info<sycl::info::device::driver_version>()
+                      << "\n\t\tUsm_device_allocations: " << device.get_info<sycl::info::device::usm_device_allocations>()
+                      << "\n\t\tUsm_host_allocations: " << device.get_info<sycl::info::device::usm_host_allocations>()
+                      << "\n\t\tUsm_shared_allocations: " << device.get_info<sycl::info::device::usm_shared_allocations>()
+                      << "\n\t\tUsm_restricted_shared_allocations: " << device.get_info<sycl::info::device::usm_restricted_shared_allocations>()
+                      << "\n\t\tUsm_system_allocations: " << device.get_info<sycl::info::device::usm_system_allocations>()
                       << "\n\t\tMem_base_addr_align: " << device.get_info<sycl::info::device::mem_base_addr_align>()
+                      << "\n\t\tGlobal_mem_size: " << device.get_info<sycl::info::device::global_mem_size>()
                       << "\n\t\tLocal_mem_size: " << device.get_info<sycl::info::device::local_mem_size>()
                       << "\n\t\tPartition_max_sub_devices: " << device.get_info<sycl::info::device::partition_max_sub_devices>()
                       << "\n\t\tMax_compute_units: " << device.get_info<sycl::info::device::max_compute_units>()
                       << "\n\t\tMax_work_item_dimensions: " << device.get_info<sycl::info::device::max_work_item_dimensions>()
                       << "\n\t\tMax_work_group/block_size: " << device.get_info<sycl::info::device::max_work_group_size>()
+                      << "\n\t\tGlobal_mem_cache_line_size: " << device.get_info<sycl::info::device::global_mem_cache_line_size>()
+                      << "\n\t\tGlobal_mem_cache_size: " << device.get_info<sycl::info::device::global_mem_cache_size>()
+                      << "\n\t\tLocal_mem_type: " << static_cast<int>(device.get_info<sycl::info::device::local_mem_type>())
                       << "\n\t\tSub_group_sizes: ";
             for (const auto &s : device.get_info<sycl::info::device::sub_group_sizes>())
                 std::cout << s << " ";
+
+            std::cout << "\n\t\tAtomic_memory_order_capabilities: ";
+            for (const auto &s : device.get_info<sycl::info::device::atomic_memory_order_capabilities>())
+                std::cout << static_cast<int>(s) << " ";
+
+            std::cout << "\n\t\tAtomic_memory_scope_capabilities: ";
+            for (const auto &s : device.get_info<sycl::info::device::atomic_memory_scope_capabilities>())
+                std::cout << static_cast<int>(s) << " ";
             std::cout << std::endl;
         }
     }
+#endif
 
     // auto platforms = sycl::platform::get_platforms();
     // q_ct1 = sycl::queue(platforms[2].get_devices()[0]);
@@ -611,7 +632,7 @@ void multiplyGpuAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K,
     result_reset();
     sycl::range<3> dimBlock(1, 1, TILE_WIDTH * TILE_WIDTH);
     sycl::range<3> dimGrid(1, 1, (N * M + dimBlock[2] - 1) / dimBlock[2]);
-
+    // {
     sycl::buffer<fp> arrAbuf{arrA, sycl::range{rangeMK}};
     sycl::buffer<fp> arrBbuf{arrB, sycl::range{rangeKN}};
     sycl::buffer<fp> arrCbuf{arrC, sycl::range{rangeMN}};
@@ -635,7 +656,7 @@ void multiplyGpuAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K,
                          }); });
     stop->wait();
     __TIME_END
-
+    // }
     sycl::host_accessor h_arrCacc{arrCbuf};
     if (!compare_matrix(arrayC_h, arrayC_href, M, N))
     {
