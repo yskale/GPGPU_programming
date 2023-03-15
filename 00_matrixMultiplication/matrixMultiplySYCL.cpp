@@ -609,6 +609,37 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     {
         printf("1. Pass, GPU calculation time (without shared memory order 7, functor) = %f ms\n", elapsedTime);
     }
+
+    // // use functor, order 8, single_task
+    // result_reset();
+    // dimBlock = sycl::range<3>(1, 1, TILE_WIDTH * TILE_WIDTH);
+    // dimGrid = sycl::range<3>(1, 1, (N * M + dimBlock[2] - 1) / dimBlock[2]);
+
+    // __TIME_BEGIN
+    // *stop = q_ct1.single_task([=]()
+    //                           {
+    //     for (int i = 0; i < M; i++)
+    //     {
+    //         for (int j = 0; j < N; j++)
+    //         {
+    //             for (int k = 0; k < K; k++)
+    //             {
+    //                 arrC[i * N + j] += arrA[i * K + k] * arrB[k * N + j];
+    //             }
+    //         }
+    //     } });
+    // stop->wait();
+    // __TIME_END
+
+    // q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
+    // if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    // {
+    //     std::cout << "1. Error at multiplyGpu order 8 (single_task)" << std::endl;
+    // }
+    // else
+    // {
+    //     printf("1. Pass, GPU calculation time (without shared memory order 8, single_task) = %f ms\n", elapsedTime);
+    // }
 }
 
 void _matrixMulAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N, sycl::nd_item<3> item_ct1)
