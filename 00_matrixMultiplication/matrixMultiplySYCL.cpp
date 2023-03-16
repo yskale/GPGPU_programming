@@ -39,6 +39,7 @@ measured depending on your goals.
 #define SUB_GRP_SZ 32
 
 typedef float fp;
+typedef sycl::float4 fp4;
 
 // const int M = 16;
 // const int K = 16;
@@ -74,6 +75,7 @@ void multiplyGpuGrp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int 
 void multiplyGpuGrpSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuBcast(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyGpuVec(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
@@ -88,6 +90,8 @@ int main()
     multiplyCpu(arrayA_h, arrayB_h, arrayC_href, M, K, N);
 
     multiplyGpu(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+
+    multiplyGpuVec(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     multiplyGpuAccessor(arrayA_h, arrayB_h, arrayC_h, M, K, N);
 
@@ -640,6 +644,235 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     // {
     //     printf("1. Pass, GPU calculation time (without shared memory order 8, single_task) = %f ms\n", elapsedTime);
     // }
+}
+
+void _setVecVal(fp4 &a, fp val)
+{
+    a.x() = val;
+    a.y() = val;
+    a.z() = val;
+    a.w() = val;
+}
+
+void _matrixVecLoadH(const fp *src, fp4 *dst, int M, int K4, int K,
+                     sycl::nd_item<3> item_ct1)
+{
+    // absolute row and col
+    unsigned int idx = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
+                       item_ct1.get_local_id(2);
+    unsigned int row = idx / K4;
+    unsigned int col = idx % K4;
+    if (row >= M || col >= K4)
+        return;
+    unsigned int offset = row * K4 + col;
+    unsigned int offsetSrc = row * K + col * 4;
+    _setVecVal(dst[offset], 0.0f);
+
+    if (col * 4 + 3 < K)
+    {
+        dst[offset].x() = src[offsetSrc];
+        dst[offset].y() = src[offsetSrc + 1];
+        dst[offset].z() = src[offsetSrc + 2];
+        dst[offset].w() = src[offsetSrc + 3];
+    }
+    else if (col * 4 + 2 < K)
+    {
+        dst[offset].x() = src[offsetSrc];
+        dst[offset].y() = src[offsetSrc + 1];
+        dst[offset].z() = src[offsetSrc + 2];
+    }
+    else if (col * 4 + 1 < K)
+    {
+        dst[offset].x() = src[offsetSrc];
+        dst[offset].y() = src[offsetSrc + 1];
+    }
+    else
+    {
+        dst[offset].x() = src[offsetSrc];
+    }
+}
+
+void _matrixVecLoadV(const fp *src, fp4 *dst, int K4, int N, int K,
+                     sycl::nd_item<3> item_ct1)
+{
+    // absolute row and col
+    unsigned int idx = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
+                       item_ct1.get_local_id(2);
+    unsigned int row = idx / N;
+    unsigned int col = idx % N;
+    if (row >= K4 || col >= N)
+        return;
+    unsigned int offset = row * N + col;
+    unsigned int offsetSrc = row * 4 * N + col;
+    _setVecVal(dst[offset], 0.0f);
+
+    if (row * 4 + 3 < K)
+    {
+        dst[offset].x() = src[offsetSrc];
+        dst[offset].y() = src[offsetSrc + N];
+        dst[offset].z() = src[offsetSrc + 2 * N];
+        dst[offset].w() = src[offsetSrc + 3 * N];
+    }
+    else if (row * 4 + 2 < K)
+    {
+        dst[offset].x() = src[offsetSrc];
+        dst[offset].y() = src[offsetSrc + N];
+        dst[offset].z() = src[offsetSrc + 2 * N];
+    }
+    else if (row * 4 + 1 < K)
+    {
+        dst[offset].x() = src[offsetSrc];
+        dst[offset].y() = src[offsetSrc + N];
+    }
+    else
+    {
+        dst[offset].x() = src[offsetSrc];
+    }
+}
+
+fp dot_prod(const fp4 &a, const fp4 &b)
+{
+    return a.x() * b.x() + a.y() * b.y() + a.z() * b.z() + a.w() * b.w();
+}
+
+void _matrixMulVec(const fp4 *arrA, const fp4 *arrB, fp *arrC, int M, int K4, int N,
+                   sycl::nd_item<3> item_ct1)
+{
+    // absolute row and col
+    int idx = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
+              item_ct1.get_local_id(2);
+    unsigned int row = idx / N;
+    unsigned int col = idx % N;
+
+    if (row < M && col < N)
+    {
+        fp sum = 0;
+        for (int k = 0; k < K4; k++)
+        {
+            sum += dot_prod(arrA[row * K4 + k], arrB[k * N + col]);
+        }
+        arrC[row * N + col] = sum;
+    }
+}
+
+void _matrixMulVecSh(const fp4 *arrA, const fp4 *arrB, fp *arrC, int M, int K4, int N,
+                     sycl::nd_item<3> item_ct1, fp4 *arrAs, fp4 *arrBs)
+{
+    // absolute row and col
+    unsigned int row = item_ct1.get_local_range(2) * item_ct1.get_group(2) +
+                       item_ct1.get_local_id(2);
+    unsigned int col = item_ct1.get_local_range(1) * item_ct1.get_group(1) +
+                       item_ct1.get_local_id(1);
+
+    fp elementC = 0.0f;
+    for (int i = 0; i < K4 / TILE_WIDTH; i++)
+    {
+        if (i * TILE_WIDTH + item_ct1.get_local_id(1) < K4)
+            arrAs[item_ct1.get_local_id(1) * TILE_WIDTH +
+                  item_ct1.get_local_id(2)] =
+                arrA[row * K4 + i * TILE_WIDTH + item_ct1.get_local_id(1)];
+        else
+            _setVecVal(arrAs[item_ct1.get_local_id(1) * TILE_WIDTH +
+                             item_ct1.get_local_id(2)],
+                       0.0f);
+        if (i * TILE_WIDTH + item_ct1.get_local_id(2) < K4)
+            arrBs[item_ct1.get_local_id(1) * TILE_WIDTH +
+                  item_ct1.get_local_id(2)] =
+                arrB[(i * TILE_WIDTH + item_ct1.get_local_id(2)) * N + col];
+        else
+            _setVecVal(arrBs[item_ct1.get_local_id(1) * TILE_WIDTH +
+                             item_ct1.get_local_id(2)],
+                       0.0f);
+        // item_ct1.barrier();
+        item_ct1.barrier(sycl::access::fence_space::local_space);
+        for (int k = 0; k < TILE_WIDTH; k++)
+            elementC +=
+                dot_prod(arrAs[k * TILE_WIDTH + item_ct1.get_local_id(2)],
+                         arrBs[item_ct1.get_local_id(1) * TILE_WIDTH + k]);
+        // item_ct1.barrier();
+        item_ct1.barrier(sycl::access::fence_space::local_space);
+    }
+
+    if (row < M && col < N)
+        arrC[row * N + col] = elementC;
+}
+
+#define USE_SHARED_MEMORY_VEC
+void multiplyGpuVec(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    result_reset();
+    fp4 *arrayA_d4, *arrayB_d4;
+    int K4 = (K + 3) / 4;
+    arrayA_d4 = sycl::malloc_device<fp4>(M * K4, q_ct1);
+    arrayB_d4 = sycl::malloc_device<fp4>(K4 * N, q_ct1);
+
+    sycl::range<3> dimBlock(1, 1, 1);
+    sycl::range<3> dimGrid(1, 1, 1);
+
+    __TIME_BEGIN
+    // load matrix values into vector type
+    dimBlock = sycl::range<3>(1, 1, TILE_WIDTH * TILE_WIDTH);
+    dimGrid = sycl::range<3>(1, 1, (M * K4 + dimBlock[2] - 1) / dimBlock[2]);
+    *stop = q_ct1.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
+                               [=](sycl::nd_item<3> item_ct1)
+                               {
+                                   _matrixVecLoadH(arrA, arrayA_d4, M, K4, K,
+                                                   item_ct1);
+                               });
+    stop->wait();
+
+    dimBlock = sycl::range<3>(1, 1, TILE_WIDTH * TILE_WIDTH);
+    dimGrid = sycl::range<3>(1, 1, (K4 * N + dimBlock[2] - 1) / dimBlock[2]);
+    *stop = q_ct1.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
+                               [=](sycl::nd_item<3> item_ct1)
+                               {
+                                   _matrixVecLoadV(arrB, arrayB_d4, K4, N, K,
+                                                   item_ct1);
+                               });
+    stop->wait();
+
+#ifdef USE_SHARED_MEMORY_VEC
+    dimBlock = sycl::range<3>(1, TILE_WIDTH, TILE_WIDTH);
+    dimGrid = sycl::range<3>(1, (N + TILE_WIDTH - 1) / TILE_WIDTH,
+                             (M + TILE_WIDTH - 1) / TILE_WIDTH);
+    *stop = q_ct1.submit([&](sycl::handler &cgh)
+                         {
+        sycl::local_accessor<fp4, 1> arrAs_acc_ct1(
+            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
+        sycl::local_accessor<fp4, 1> arrBs_acc_ct1(
+            sycl::range<1>(TILE_WIDTH * TILE_WIDTH), cgh);
+
+        cgh.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
+                         [=](sycl::nd_item<3> item_ct1) {
+                             _matrixMulVecSh(arrayA_d4, arrayB_d4, arrC, M, K4,
+                                             N, item_ct1,
+                                             arrAs_acc_ct1.get_pointer(),
+                                             arrBs_acc_ct1.get_pointer());
+                         }); });
+#else
+    dimBlock = sycl::range<3>(1, 1, TILE_WIDTH * TILE_WIDTH);
+    dimGrid = sycl::range<3>(1, 1, (M * N + dimBlock[2] - 1) / dimBlock[2]);
+    *stop = q_ct1.parallel_for(sycl::nd_range<3>(dimGrid * dimBlock, dimBlock),
+                               [=](sycl::nd_item<3> item_ct1)
+                               {
+                                   _matrixMulVec(arrayA_d4, arrayB_d4, arrC, M,
+                                                 K4, N, item_ct1);
+                               });
+#endif
+    stop->wait();
+    __TIME_END
+
+    q_ct1.memcpy(arrayC_h, arrC, M * N * sizeof(fp)).wait();
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    {
+        std::cout << "1. Error at multiplyGpuVec" << std::endl;
+    }
+    else
+    {
+        printf("1. Pass, GPU calculation time (with float4 type) = %f ms\n", elapsedTime);
+    }
+    sycl::free(arrayA_d4, q_ct1);
+    sycl::free(arrayB_d4, q_ct1);
 }
 
 void _matrixMulAccessor(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N, sycl::nd_item<3> item_ct1)

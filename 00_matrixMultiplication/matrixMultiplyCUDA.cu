@@ -23,6 +23,7 @@
 #define TILE_WIDTH 16
 
 typedef float fp;
+typedef float4 fp4;
 
 static int M = 2048;
 static int K = 1024;
@@ -41,6 +42,7 @@ void print_matrix(const fp *arr, int M, int N);
 bool compare_matrix(const fp *arr1, const fp *arr2, int M, int N);
 void multiplyCpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
+void multiplyGpuVec(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuSh2(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
 void multiplyGpuShBc(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N);
@@ -55,6 +57,8 @@ int main()
     multiplyCpu(arrayA_h, arrayB_h, arrayC_href, M, K, N);
 
     multiplyGpu(arrayA_d, arrayB_d, arrayC_d, M, K, N);
+
+    multiplyGpuVec(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
     multiplyGpuSh(arrayA_d, arrayB_d, arrayC_d, M, K, N);
 
@@ -359,6 +363,184 @@ void multiplyGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     }
 }
 
+__device__ void _setVecVal(fp4 & a, fp val){
+    a.x = val;
+    a.y = val;
+    a.z = val;
+    a.w = val;
+}
+
+__global__ void _matrixVecLoadH(const fp *src, fp4 *dst, int M, int K4, int K)
+{
+    // absolute row and col
+    unsigned int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int row = idx / K4;
+    unsigned int col = idx % K4;
+    if (row >= M || col >= K4)
+        return;
+    unsigned int offset = row * K4 + col;
+    unsigned int offsetSrc = row * K + col * 4;
+    _setVecVal(dst[offset], 0.0f);
+
+    if (col * 4 + 3 < K)
+    {
+        dst[offset].x = src[offsetSrc];
+        dst[offset].y = src[offsetSrc + 1];
+        dst[offset].z = src[offsetSrc + 2];
+        dst[offset].w = src[offsetSrc + 3];
+    }
+    else if (col * 4 + 2 < K)
+    {
+        dst[offset].x = src[offsetSrc];
+        dst[offset].y = src[offsetSrc + 1];
+        dst[offset].z = src[offsetSrc + 2];
+    }
+    else if (col * 4 + 1 < K)
+    {
+        dst[offset].x = src[offsetSrc];
+        dst[offset].y = src[offsetSrc + 1];
+    }
+    else
+    {
+        dst[offset].x = src[offsetSrc];
+    }
+}
+
+__global__ void _matrixVecLoadV(const fp *src, fp4 *dst, int K4, int N, int K)
+{
+    // absolute row and col
+    unsigned int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int row = idx / N;
+    unsigned int col = idx % N;
+    if (row >= K4 || col >= N)
+        return;
+    unsigned int offset = row * N + col;
+    unsigned int offsetSrc = row * 4 * N + col;
+    _setVecVal(dst[offset], 0.0f);
+
+    if (row * 4 + 3 < K)
+    {
+        dst[offset].x = src[offsetSrc];
+        dst[offset].y = src[offsetSrc + N];
+        dst[offset].z = src[offsetSrc + 2 * N];
+        dst[offset].w = src[offsetSrc + 3 * N];
+    }
+    else if (row * 4 + 2 < K)
+    {
+        dst[offset].x = src[offsetSrc];
+        dst[offset].y = src[offsetSrc + N];
+        dst[offset].z = src[offsetSrc + 2 * N];
+    }
+    else if (row * 4 + 1 < K)
+    {
+        dst[offset].x = src[offsetSrc];
+        dst[offset].y = src[offsetSrc + N];
+    }
+    else
+    {
+        dst[offset].x = src[offsetSrc];
+    }
+}
+
+__device__ fp dot_prod(const fp4 &a, const fp4 &b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+__global__ void _matrixMulVec(const fp4 *arrA, const fp4 *arrB, fp *arrC, int M, int K4, int N)
+{
+    // absolute row and col
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int row = idx / N;
+    unsigned int col = idx % N;
+
+    if (row < M && col < N)
+    {
+        fp sum = 0;
+        for (int k = 0; k < K4; k++)
+        {
+            sum += dot_prod(arrA[row * K4 + k], arrB[k * N + col]);
+        }
+        arrC[row * N + col] = sum;
+    }
+}
+
+__global__ void _matrixMulVecSh(const fp4 *arrA, const fp4 *arrB, fp *arrC, int M, int K4, int N)
+{
+    // absolute row and col
+    unsigned int row = blockDim.x * blockIdx.x + threadIdx.x;
+    unsigned int col = blockDim.y * blockIdx.y + threadIdx.y;
+
+    __shared__ fp4 arrAs[TILE_WIDTH * TILE_WIDTH];
+    __shared__ fp4 arrBs[TILE_WIDTH * TILE_WIDTH];
+
+    fp elementC = 0.0f;
+    for (int i = 0; i < K4 / TILE_WIDTH; i++)
+    {
+        if (i * TILE_WIDTH + threadIdx.y < K4)
+            arrAs[threadIdx.y * TILE_WIDTH + threadIdx.x] = arrA[row * K4 + i * TILE_WIDTH + threadIdx.y];
+        else
+            _setVecVal(arrAs[threadIdx.y * TILE_WIDTH + threadIdx.x], 0.0f);
+        if (i * TILE_WIDTH + threadIdx.x < K4)
+            arrBs[threadIdx.y * TILE_WIDTH + threadIdx.x] = arrB[(i * TILE_WIDTH + threadIdx.x) * N + col];
+        else
+            _setVecVal(arrBs[threadIdx.y * TILE_WIDTH + threadIdx.x], 0.0f);
+        __syncthreads();
+        for (int k = 0; k < TILE_WIDTH; k++)
+            elementC += dot_prod(arrAs[k * TILE_WIDTH + threadIdx.x], arrBs[threadIdx.y * TILE_WIDTH + k]);
+        __syncthreads();
+    }
+
+    if (row < M && col < N)
+        arrC[row * N + col] = elementC;
+}
+
+#define USE_SHARED_MEMORY_VEC
+void multiplyGpuVec(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
+{
+    result_reset();
+    fp4 *arrayA_d4, *arrayB_d4;
+    int K4 = (K + 3) / 4;
+    cudaMalloc((void **)&arrayA_d4, M * K4 * sizeof(fp4));
+    cudaMalloc((void **)&arrayB_d4, K4 * N * sizeof(fp4));
+
+    dim3 dimBlock;
+    dim3 dimGrid;
+
+    __TIME_BEGIN
+    // load matrix values into vector type
+    dimBlock = dim3(TILE_WIDTH * TILE_WIDTH, 1, 1);
+    dimGrid = dim3((M * K4 + dimBlock.x - 1) / dimBlock.x, 1, 1);
+    _matrixVecLoadH<<<dimGrid, dimBlock>>>(arrA, arrayA_d4, M, K4, K);
+
+    dimBlock = dim3(TILE_WIDTH * TILE_WIDTH, 1, 1);
+    dimGrid = dim3((K4 * N + dimBlock.x - 1) / dimBlock.x, 1, 1);
+    _matrixVecLoadV<<<dimGrid, dimBlock>>>(arrB, arrayB_d4, K4, N, K);
+
+#ifdef USE_SHARED_MEMORY_VEC
+    dimBlock = dim3(TILE_WIDTH, TILE_WIDTH, 1);
+    dimGrid = dim3((M + TILE_WIDTH - 1) / TILE_WIDTH, (N + TILE_WIDTH - 1) / TILE_WIDTH, 1);
+    _matrixMulVecSh<<<dimGrid, dimBlock>>>(arrayA_d4, arrayB_d4, arrC, M, K4, N);
+#else
+    dimBlock = dim3(TILE_WIDTH * TILE_WIDTH, 1, 1);
+    dimGrid = dim3((M * N + dimBlock.x - 1) / dimBlock.x, 1, 1);
+    _matrixMulVec<<<dimGrid, dimBlock>>>(arrayA_d4, arrayB_d4, arrC, M, K4, N);
+#endif
+    __TIME_END
+
+    cudaMemcpy(arrayC_h, arrC, M * N * sizeof(fp), cudaMemcpyDeviceToHost);
+    if (!compare_matrix(arrayC_h, arrayC_href, M, N))
+    {
+        std::cout << "1. Error at multiplyGpuVec" << std::endl;
+    }
+    else
+    {
+        printf("1. Pass, GPU calculation time (with float4 type) = %f ms\n", elapsedTime);
+    }
+    cudaFree(arrayA_d4);
+    cudaFree(arrayB_d4);
+}
+
 __global__ void _matrixMulSh(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
 {
     // absolute row and col
@@ -604,7 +786,7 @@ void multiplyGpuOmp(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int 
 #pragma omp target data use_device_ptr(arrA, arrB, arrC)
     {
 #pragma omp target teams distribute parallel for collapse(2)
-// #pragma omp target teams loop order(concurrent) collapse(2)
+        // #pragma omp target teams loop order(concurrent) collapse(2)
         for (int i = 0; i < M; i++)
         {
             for (int j = 0; j < N; j++)
