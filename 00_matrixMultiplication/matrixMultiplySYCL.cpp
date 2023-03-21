@@ -749,7 +749,8 @@ void _matrixMulVec(const fp4 *arrA, const fp4 *arrB, fp *arrC, int M, int K4, in
         fp sum = 0;
         for (int k = 0; k < K4; k++)
         {
-            sum += dot_prod(arrA[row * K4 + k], arrB[k * N + col]);
+            // sum += dot_prod(arrA[row * K4 + k], arrB[k * N + col]);
+            sum += sycl::dot(arrA[row * K4 + k], arrB[k * N + col]);
         }
         arrC[row * N + col] = sum;
     }
@@ -786,8 +787,11 @@ void _matrixMulVecSh(const fp4 *arrA, const fp4 *arrB, fp *arrC, int M, int K4, 
         // item_ct1.barrier();
         item_ct1.barrier(sycl::access::fence_space::local_space);
         for (int k = 0; k < TILE_WIDTH; k++)
+            // elementC +=
+            //     dot_prod(arrAs[k * TILE_WIDTH + item_ct1.get_local_id(2)],
+            //              arrBs[item_ct1.get_local_id(1) * TILE_WIDTH + k]);
             elementC +=
-                dot_prod(arrAs[k * TILE_WIDTH + item_ct1.get_local_id(2)],
+                sycl::dot(arrAs[k * TILE_WIDTH + item_ct1.get_local_id(2)],
                          arrBs[item_ct1.get_local_id(1) * TILE_WIDTH + k]);
         // item_ct1.barrier();
         item_ct1.barrier(sycl::access::fence_space::local_space);
