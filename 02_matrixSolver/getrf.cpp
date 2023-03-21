@@ -20,8 +20,13 @@
         std::chrono::duration<float, std::milli>(stop_ct1 - start_ct1).count();
 
 // #define SHOW_MATRIX
-
+// #define DOUBLE_FP_CASE
+#ifdef DOUBLE_FP_CASE
+typedef double fp;
+#else
 typedef float fp;
+#endif
+
 const bool pivot_on = true;
 const fp sparselevel = 0.3;
 const int N = 1000;
@@ -134,6 +139,8 @@ void resources_init()
 void result_reset()
 {
     memset(resx_h, 0, N * sizeof(fp));
+    q_ct1.memcpy(matA_d, matA_h, matSize * sizeof(fp));
+    q_ct1.memcpy(vecb_d, vecb_h, N * sizeof(fp)).wait();
 }
 
 void resources_free()
@@ -179,22 +186,27 @@ void check_result(fp *matA, fp *resX, fp *vecb, int n)
 int main()
 {
     resources_init();
-
+    for (int i = 0; i < 10; i++)
+    {
+        result_reset();
+        /*
+        DPCT1047:1: The meaning of P_d in the oneapi::mkl::lapack::getrf is
+        different from the cusolverDnDgetrf. You may need to check the migrated
+        code.
+        */
+        __TIME_BEGIN
+        oneapi::mkl::lapack::getrf(q_ct1, N, N, matA_d, lda,
+                                   P_d, workMat_d, lworkMat);
+        oneapi::mkl::lapack::getrs(
+            q_ct1, oneapi::mkl::transpose::nontrans, N, 1, matA_d,
+            lda, P_d, vecb_d, ldb, workVec_d, lworkVec);
+        q_ct1.wait();
+        __TIME_END
+        std::cout << "No. " << i << " run, GPU calculation time = " << elapsedTime << "ms\n";
+    }
     __TIME_BEGIN
-    /*
-    DPCT1047:1: The meaning of P_d in the oneapi::mkl::lapack::getrf is
-    different from the cusolverDnDgetrf. You may need to check the migrated
-    code.
-    */
-    oneapi::mkl::lapack::getrf(q_ct1, N, N, matA_d, lda,
-                               P_d, workMat_d, lworkMat);
-    oneapi::mkl::lapack::getrs(
-        q_ct1, oneapi::mkl::transpose::nontrans, N, 1, matA_d,
-        lda, P_d, vecb_d, ldb, workVec_d, lworkVec);
     // std::vector<void *> ws_vec_ct5{workVec_d};
     // dpct::async_dpct_free(ws_vec_ct5, {event_ct4}, q_ct1);
-
-    __TIME_END
     q_ct1.memcpy(LU_h, matA_d, sizeof(fp) * matSize);
     q_ct1.memcpy(resx_h, vecb_d, sizeof(fp) * N).wait();
 
@@ -215,7 +227,6 @@ int main()
 #endif
 
     check_result(matA_h, resx_h, vecb_h, N);
-    std::cout << "GPU calculation time = " << elapsedTime << "ms\n";
 
     resources_free();
     return 0;

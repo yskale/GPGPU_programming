@@ -11,8 +11,13 @@
     cudaEventElapsedTime(&elapsedTime, start, stop);
 
 // #define SHOW_MATRIX
-
+// #define DOUBLE_FP_CASE
+#ifdef DOUBLE_FP_CASE
 typedef double fp;
+#else
+typedef float fp;
+#endif
+
 const bool pivot_on = true;
 const fp sparselevel = 0.3;
 const int N = 1000;
@@ -92,8 +97,11 @@ void resources_init()
 
     cusolverDnCreate(&cusolverH);
     // cusolverDnSetStream(cusolverH, stream)
-
-    cusolverDnDgetrf_bufferSize(cusolverH, N, N, matA_d, lda, &lwork); // cusolverDnSgetrf_bufferSize
+#ifdef DOUBLE_FP_CASE
+    cusolverDnDgetrf_bufferSize(cusolverH, N, N, matA_d, lda, &lwork);
+#else
+    cusolverDnSgetrf_bufferSize(cusolverH, N, N, matA_d, lda, &lwork);
+#endif
     cudaMalloc((void **)&work_d, sizeof(fp) * lwork);
 
     cudaEventCreate(&start);
@@ -110,6 +118,8 @@ void resources_init()
 void result_reset()
 {
     memset(resx_h, 0, N * sizeof(fp));
+    cudaMemcpy(matA_d, matA_h, matSize * sizeof(fp), cudaMemcpyHostToDevice);
+    cudaMemcpy(vecb_d, vecb_h, N * sizeof(fp), cudaMemcpyHostToDevice);
 }
 
 void resources_free()
@@ -156,11 +166,20 @@ void check_result(fp *matA, fp *resX, fp *vecb, int n)
 int main()
 {
     resources_init();
-__TIME_BEGIN
-    cusolverDnDgetrf(cusolverH, N, N, matA_d, lda, work_d, P_d, info_d);
-    // cudaMemcpy(&info_h, info_d, sizeof(int), cudaMemcpyDeviceToHost);
-    cusolverDnDgetrs(cusolverH, CUBLAS_OP_N, N, 1, matA_d, lda, P_d, vecb_d, ldb, info_d);
-__TIME_END
+    for (int i = 0; i < 10; i++)
+    {
+        result_reset();
+        __TIME_BEGIN
+#ifdef DOUBLE_FP_CASE
+        cusolverDnDgetrf(cusolverH, N, N, matA_d, lda, work_d, P_d, info_d);
+        cusolverDnDgetrs(cusolverH, CUBLAS_OP_N, N, 1, matA_d, lda, P_d, vecb_d, ldb, info_d);
+#else
+        cusolverDnSgetrf(cusolverH, N, N, matA_d, lda, work_d, P_d, info_d);
+        cusolverDnSgetrs(cusolverH, CUBLAS_OP_N, N, 1, matA_d, lda, P_d, vecb_d, ldb, info_d);
+#endif
+        __TIME_END
+        std::cout << "No. " << i << " run, GPU calculation time = " << elapsedTime << "ms\n";
+    }
     cudaMemcpy(&info_h, info_d, sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(LU_h, matA_d, sizeof(fp) * matSize, cudaMemcpyDeviceToHost);
     cudaMemcpy(resx_h, vecb_d, sizeof(fp) * N, cudaMemcpyDeviceToHost);
@@ -188,7 +207,6 @@ __TIME_END
 #endif
 
     check_result(matA_h, resx_h, vecb_h, N);
-    std::cout << "GPU calculation time = " << elapsedTime << "ms\n";
 
     resources_free();
     return 0;
