@@ -1,8 +1,11 @@
-// nvcc -arch=sm_70 -lcublas -lcusolver geqrf.cu
-// solve Ax=b, with QR factorization
+// nvcc -arch=sm_70 -lcublas -lcusolver potrf.cu
+// solve Ax=b, with Cholesky factorization for positive definite Hermitian (symmetry) matrix
+// A = L0*(L0*T), where *T = conjugate transpose
+
 #include <iostream>
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
+#include <limits>
 
 #define __TIME_BEGIN cudaEventRecord(start);
 #define __TIME_END              \
@@ -23,17 +26,17 @@ const int N = 1000;
 constexpr int lda = N;
 constexpr int ldb = N;
 constexpr int matSize = N * N;
-const fp alpha = 1;
 cusolverDnHandle_t cusolverH = NULL;
-cublasHandle_t cublasH = NULL;
+
 int lwork = 0;         /* size of workspace */
-fp *work_d = nullptr;  /* device workspace for geqrf */
+fp *work_d = nullptr;  /* device workspace for potrf */
 int *info_d = nullptr; /* error info */
 int *info_h = nullptr;
 const int info_size = 2;
 
 fp *matA_h, *vecb_h, *resx_h;
-fp *matA_d, *vecb_d, *tau_d;
+fp *matA_d, *vecb_d;
+fp *L0; /* cholesky factor of A */
 
 cudaEvent_t start, stop;
 float elapsedTime;
@@ -57,20 +60,50 @@ void resources_init()
 {
     matA_h = new fp[matSize]();
     vecb_h = new fp[N]();
+    // matA_h = new fp[matSize]{1.0, 2.0, 3.0, 2.0, 5.0, 5.0, 3.0, 5.0, 12.0};
+    // vecb_h = new fp[N]{1.0, 1.0, 1.0};
     resx_h = new fp[N]();
     info_h = new int[info_size]();
+    L0 = new fp[matSize]();
 
     cudaMalloc((void **)&matA_d, matSize * sizeof(fp));
     cudaMalloc((void **)&vecb_d, N * sizeof(fp));
     cudaMalloc((void **)&info_d, sizeof(int) * info_size);
-    cudaMalloc((void **)&tau_d, sizeof(fp) * N);
 
+    // ======================================================================================
+    // create a tmp random matrix
+    fp *matTmp_h = new fp[matSize]();
     for (int i = 0; i < matSize; i++)
     {
-        matA_h[i] = rand() / (fp)RAND_MAX * 1.0;
+        matTmp_h[i] = rand() / (fp)RAND_MAX * 1.0;
         if (rand() / (fp)RAND_MAX * 1.0 < sparselevel) // make the matrix become sparse
-            matA_h[i] = 0.0;
+            matTmp_h[i] = 0.0;
     }
+
+    // create positive definite Hermitian (symmetry) matrix, https://cplusplus.com/forum/general/257711/
+    fp maxVal = std::numeric_limits<fp>::min();
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            matA_h[j * N + i] = 0;
+            for (int k = 0; k < N; k++)
+            {
+                matA_h[j * N + i] += matTmp_h[k * N + i] * matTmp_h[k * N + j];
+            }
+            maxVal = std::max(maxVal, matA_h[j * N + i]);
+        }
+    }
+    // normalization
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            matA_h[j * N + i] /= maxVal;
+        }
+    }
+    delete[] matTmp_h;
+    // ======================================================================================
 
     for (int i = 0; i < N; i++)
         vecb_h[i] = rand() / (fp)RAND_MAX * 1.0;
@@ -81,18 +114,13 @@ void resources_init()
     cudaMemcpy(vecb_d, vecb_h, N * sizeof(fp), cudaMemcpyHostToDevice);
 
     cusolverDnCreate(&cusolverH);
-    cublasCreate(&cublasH);
     // cusolverDnSetStream(cusolverH, stream)
-    int lwork_geqrf = 0;
-    int lwork_ormqr = 0;
+
 #ifdef DOUBLE_FP_CASE
-    cusolverDnDgeqrf_bufferSize(cusolverH, N, N, matA_d, lda, &lwork_geqrf);
-    cusolverDnDormqr_bufferSize(cusolverH, CUBLAS_SIDE_LEFT, CUBLAS_OP_T, N, 1, N, matA_d, lda, tau_d, vecb_d, ldb, &lwork_ormqr);
+    cusolverDnDpotrf_bufferSize(cusolverH, CUBLAS_FILL_MODE_LOWER, N, matA_d, lda, &lwork);
 #else
-    cusolverDnSgeqrf_bufferSize(cusolverH, N, N, matA_d, lda, &lwork_geqrf);
-    cusolverDnSormqr_bufferSize(cusolverH, CUBLAS_SIDE_LEFT, CUBLAS_OP_T, N, 1, N, matA_d, lda, tau_d, vecb_d, ldb, &lwork_ormqr);
+    cusolverDnSpotrf_bufferSize(cusolverH, CUBLAS_FILL_MODE_LOWER, N, matA_d, lda, &lwork);
 #endif
-    lwork = std::max(lwork_geqrf, lwork_ormqr);
     cudaMalloc((void **)&work_d, sizeof(fp) * lwork);
 
     cudaEventCreate(&start);
@@ -119,14 +147,13 @@ void resources_free()
     delete[] vecb_h;
     delete[] resx_h;
     delete[] info_h;
+    delete[] L0;
 
     cudaFree(matA_d);
     cudaFree(vecb_d);
     cudaFree(info_d);
     cudaFree(work_d);
-    cudaFree(tau_d);
     cusolverDnDestroy(cusolverH);
-    cublasDestroy(cublasH);
 
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
@@ -158,33 +185,28 @@ int main()
         result_reset();
         __TIME_BEGIN
 #ifdef DOUBLE_FP_CASE
-        // compute QR factorization
-        cusolverDnDgeqrf(cusolverH, N, N, matA_d, lda, tau_d, work_d, lwork, &info_d[0]);
-        // compute Q^T*B
-        cusolverDnDormqr(cusolverH, CUBLAS_SIDE_LEFT, CUBLAS_OP_T, N, 1, N,
-                         matA_d, lda, tau_d, vecb_d, ldb, work_d, lwork, &info_d[1]);
-        // compute x = R \ Q^T*B
-        cublasDtrsm(cublasH, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
-                    CUBLAS_DIAG_NON_UNIT, N, 1, &alpha, matA_d, lda, vecb_d, ldb);
+        // Cholesky factorization
+        cusolverDnDpotrf(cusolverH, CUBLAS_FILL_MODE_LOWER, N, matA_d, lda, work_d, lwork, &info_d[0]);
+        // solve A*x = b
+        cusolverDnDpotrs(cusolverH, CUBLAS_FILL_MODE_LOWER, N, 1, matA_d, lda, vecb_d, ldb, &info_d[1]);
 #else
-        // compute QR factorization
-        cusolverDnSgeqrf(cusolverH, N, N, matA_d, lda, tau_d, work_d, lwork, &info_d[0]);
-        // compute Q^T*B
-        cusolverDnSormqr(cusolverH, CUBLAS_SIDE_LEFT, CUBLAS_OP_T, N, 1, N,
-                         matA_d, lda, tau_d, vecb_d, ldb, work_d, lwork, &info_d[1]);
-        // compute x = R \ Q^T*B
-        cublasStrsm(cublasH, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
-                    CUBLAS_DIAG_NON_UNIT, N, 1, &alpha, matA_d, lda, vecb_d, ldb);
+        // Cholesky factorization
+        cusolverDnSpotrf(cusolverH, CUBLAS_FILL_MODE_LOWER, N, matA_d, lda, work_d, lwork, &info_d[0]);
+        // solve A*x = b
+        cusolverDnSpotrs(cusolverH, CUBLAS_FILL_MODE_LOWER, N, 1, matA_d, lda, vecb_d, ldb, &info_d[1]);
 #endif
         __TIME_END
         std::cout << "No. " << i << " run, GPU calculation time = " << elapsedTime << "ms\n";
     }
-    
+
+    cudaMemcpy(L0, matA_d, sizeof(fp) * matSize, cudaMemcpyDeviceToHost);
     cudaMemcpy(resx_h, vecb_d, sizeof(fp) * N, cudaMemcpyDeviceToHost);
     cudaMemcpy(info_h, info_d, sizeof(int) * info_size, cudaMemcpyDeviceToHost);
 
     for (int i = 0; i < info_size; i++)
     {
+        if (i == 0 && 2 == info_h[i])
+            std::cout << "Error, Matrix A is not positive definite \n";
         if (0 > info_h[i])
         {
             std::cout << "i = " << i << ", " << -info_h[i] << "-th parameter is wrong \n";
@@ -193,6 +215,8 @@ int main()
     }
 
 #ifdef SHOW_MATRIX
+    std::cout << "L0 = (upper triangle doesn't matter, which is same as A) \n";
+    print_matrix(L0, N, N);
     std::cout << "x = \n";
     print_matrix(resx_h, N, 1);
 #endif

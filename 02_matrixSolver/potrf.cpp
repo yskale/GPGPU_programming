@@ -1,12 +1,17 @@
-// icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core geqrf.cpp
-// solve Ax=b, with QR factorization
+// icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core potrf.cpp
+// solve Ax=b, with Cholesky factorization for positive definite Hermitian (symmetry) matrix
+// A = L0*(L0*T), where *T = conjugate transpose
+
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include <iostream>
 #include <oneapi/mkl.hpp>
 #include <dpct/blas_utils.hpp>
 
+#include <limits>
 #include <chrono>
+
+#include <thread>
 
 #define __TIME_BEGIN                              \
     start_ct1 = std::chrono::steady_clock::now(); \
@@ -32,12 +37,18 @@ const int N = 1000;
 constexpr int lda = N;
 constexpr int ldb = N;
 constexpr int matSize = N * N;
-const fp alpha = 1;
-int lwork = 0;        /* size of workspace */
-fp *work_d = nullptr; /* device workspace for geqrf */
+
+int lwork_potrf = 0;        /* size of workspace */
+fp *work_potrf_d = nullptr; /* device workspace for potrf */
+int lwork_potrs = 0;        /* size of workspace */
+fp *work_potrs_d = nullptr; /* device workspace for potrs */
+int *info_d = nullptr;      /* error info */
+int *info_h = nullptr;
+const int info_size = 2;
 
 fp *matA_h, *vecb_h, *resx_h;
-fp *matA_d, *vecb_d, *tau_d;
+fp *matA_d, *vecb_d;
+fp *L0; /* cholesky factor of A */
 
 dpct::event_ptr start, stop;
 std::chrono::time_point<std::chrono::steady_clock> start_ct1;
@@ -76,18 +87,50 @@ void resources_init()
 
     matA_h = new fp[matSize]();
     vecb_h = new fp[N]();
+    // matA_h = new fp[matSize]{1.0, 2.0, 3.0, 2.0, 5.0, 5.0, 3.0, 5.0, 12.0};
+    // vecb_h = new fp[N]{1.0, 1.0, 1.0};
     resx_h = new fp[N]();
+    info_h = new int[info_size]();
+    L0 = new fp[matSize]();
 
     matA_d = sycl::malloc_device<fp>(matSize, q_ct1);
     vecb_d = sycl::malloc_device<fp>(N, q_ct1);
-    tau_d = sycl::malloc_device<fp>(N, q_ct1);
+    info_d = sycl::malloc_device<int>(info_size, q_ct1);
 
+    // ======================================================================================
+    // create a tmp random matrix
+    fp *matTmp_h = new fp[matSize]();
     for (int i = 0; i < matSize; i++)
     {
-        matA_h[i] = rand() / (fp)RAND_MAX * 1.0;
+        matTmp_h[i] = rand() / (fp)RAND_MAX * 1.0;
         if (rand() / (fp)RAND_MAX * 1.0 < sparselevel) // make the matrix become sparse
-            matA_h[i] = 0.0;
+            matTmp_h[i] = 0.0;
     }
+
+    // create positive definite Hermitian (symmetry) matrix, https://cplusplus.com/forum/general/257711/
+    fp maxVal = std::numeric_limits<fp>::min();
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            matA_h[j * N + i] = 0;
+            for (int k = 0; k < N; k++)
+            {
+                matA_h[j * N + i] += matTmp_h[k * N + i] * matTmp_h[k * N + j];
+            }
+            maxVal = std::max(maxVal, matA_h[j * N + i]);
+        }
+    }
+    // normalization
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            matA_h[j * N + i] /= maxVal;
+        }
+    }
+    delete[] matTmp_h;
+    // ======================================================================================
 
     for (int i = 0; i < N; i++)
         vecb_h[i] = rand() / (fp)RAND_MAX * 1.0;
@@ -97,17 +140,13 @@ void resources_init()
     q_ct1.memcpy(matA_d, matA_h, matSize * sizeof(fp));
     q_ct1.memcpy(vecb_d, vecb_h, N * sizeof(fp)).wait();
 
-    int lwork_geqrf = 0;
-    int lwork_ormqr = 0;
+    lwork_potrf = oneapi::mkl::lapack::potrf_scratchpad_size<float>(
+        q_ct1, oneapi::mkl::uplo::lower, N, lda);
+    work_potrf_d = sycl::malloc_device<fp>(lwork_potrf, q_ct1);
 
-    lwork_geqrf = oneapi::mkl::lapack::geqrf_scratchpad_size<fp>(
-        q_ct1, N, N, lda);
-    lwork_ormqr = oneapi::mkl::lapack::ormqr_scratchpad_size<fp>(
-        q_ct1, oneapi::mkl::side::left, oneapi::mkl::transpose::trans, N,
-        1, N, lda, ldb);
-
-    lwork = std::max(lwork_geqrf, lwork_ormqr);
-    work_d = sycl::malloc_device<fp>(lwork, q_ct1);
+    lwork_potrs = oneapi::mkl::lapack::potrs_scratchpad_size<float>(
+        q_ct1, oneapi::mkl::uplo::lower, N, 1, lda, ldb);
+    work_potrs_d = sycl::malloc_device<fp>(lwork_potrs, q_ct1);
 
     start = new sycl::event();
     stop = new sycl::event();
@@ -132,11 +171,14 @@ void resources_free()
     delete[] matA_h;
     delete[] vecb_h;
     delete[] resx_h;
+    delete[] info_h;
+    delete[] L0;
 
     sycl::free(matA_d, q_ct1);
     sycl::free(vecb_d, q_ct1);
-    sycl::free(work_d, q_ct1);
-    sycl::free(tau_d, q_ct1);
+    sycl::free(info_d, q_ct1);
+    sycl::free(work_potrf_d, q_ct1);
+    sycl::free(work_potrs_d, q_ct1);
 
     dpct::destroy_event(start);
     dpct::destroy_event(stop);
@@ -167,27 +209,36 @@ int main()
     {
         result_reset();
         __TIME_BEGIN
-        // compute QR factorization
-        oneapi::mkl::lapack::geqrf(q_ct1, N, N, matA_d, lda,
-                                   tau_d, work_d, lwork);
-        // compute Q^T*B
-        oneapi::mkl::lapack::ormqr(
-            q_ct1, oneapi::mkl::side::left, oneapi::mkl::transpose::trans,
-            N, 1, N, matA_d, lda, tau_d, vecb_d, ldb,
-            work_d, lwork);
-        // compute x = R \ Q^T*B
-        oneapi::mkl::blas::column_major::trsm(
-            q_ct1, oneapi::mkl::side::left, oneapi::mkl::uplo::upper,
-            oneapi::mkl::transpose::nontrans, oneapi::mkl::diag::nonunit, N, 1,
-            alpha, matA_d, lda, vecb_d, ldb);
-        q_ct1.wait();
+        // Cholesky factorization
+        oneapi::mkl::lapack::potrf(q_ct1, oneapi::mkl::uplo::lower, N,
+                                   matA_d, lda, work_potrf_d,
+                                   lwork_potrf);
+        // solve A*x = b
+        oneapi::mkl::lapack::potrs(
+            q_ct1, oneapi::mkl::uplo::lower, N, 1, matA_d, lda,
+            vecb_d, ldb, work_potrs_d, lwork_potrs);
         __TIME_END
         std::cout << "No. " << i << " run, GPU calculation time = " << elapsedTime << "ms\n";
     }
 
-    q_ct1.memcpy(resx_h, vecb_d, sizeof(fp) * N).wait();
+    q_ct1.memcpy(L0, matA_d, sizeof(fp) * matSize);
+    q_ct1.memcpy(resx_h, vecb_d, sizeof(fp) * N);
+    q_ct1.memcpy(info_h, info_d, sizeof(int) * info_size).wait();
+
+    for (int i = 0; i < info_size; i++)
+    {
+        if (i == 0 && 2 == info_h[i])
+            std::cout << "Error, Matrix A is not positive definite \n";
+        if (0 > info_h[i])
+        {
+            std::cout << "i = " << i << ", " << -info_h[i] << "-th parameter is wrong \n";
+            exit(i + 1);
+        }
+    }
 
 #ifdef SHOW_MATRIX
+    std::cout << "L0 = (upper triangle doesn't matter, which is same as A) \n";
+    print_matrix(L0, N, N);
     std::cout << "x = \n";
     print_matrix(resx_h, N, 1);
 #endif
