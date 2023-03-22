@@ -1,5 +1,5 @@
-// icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core getrf.cpp
-// solve Ax=b, with LU or PLU factorization
+// icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core geqrf.cpp
+// solve Ax=b, with QR factorization
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include <iostream>
@@ -27,22 +27,17 @@ typedef double fp;
 typedef float fp;
 #endif
 
-const bool pivot_on = true;
 const fp sparselevel = 0.3;
 const int N = 1000;
 constexpr int lda = N;
 constexpr int ldb = N;
 constexpr int matSize = N * N;
-
-int64_t lworkMat = 0;    /* size of workspace */
-fp *workMat_d = nullptr; /* device workspace for getrf */
-int64_t lworkVec = 0;    /* size of workspace */
-fp *workVec_d = nullptr; /* device workspace for getrs */
+const fp alpha = 1;
+int lwork = 0;        /* size of workspace */
+fp *work_d = nullptr; /* device workspace for getrf */
 
 fp *matA_h, *vecb_h, *resx_h;
-fp *matA_d, *vecb_d, *LU_h;
-
-int64_t *P_h, *P_d;
+fp *matA_d, *vecb_d, *tau_d;
 
 dpct::event_ptr start, stop;
 std::chrono::time_point<std::chrono::steady_clock> start_ct1;
@@ -82,25 +77,10 @@ void resources_init()
     matA_h = new fp[matSize]();
     vecb_h = new fp[N]();
     resx_h = new fp[N]();
-    LU_h = new fp[matSize]();
 
     matA_d = sycl::malloc_device<fp>(matSize, q_ct1);
     vecb_d = sycl::malloc_device<fp>(N, q_ct1);
-
-    assert(pivot_on);
-    if (pivot_on)
-    {
-        std::cout << "pivot is on : compute P*A = L*U \n";
-        P_d = sycl::malloc_device<int64_t>(N, q_ct1);
-        q_ct1.memset(P_d, 0, N * sizeof(fp)).wait();
-        P_h = new int64_t[N]();
-    }
-    else
-    {
-        std::cout << "pivot is off: compute A = L*U (not numerically stable)\n";
-        P_d = nullptr;
-        P_h = nullptr;
-    }
+    tau_d = sycl::malloc_device<fp>(N, q_ct1);
 
     for (int i = 0; i < matSize; i++)
     {
@@ -117,11 +97,17 @@ void resources_init()
     q_ct1.memcpy(matA_d, matA_h, matSize * sizeof(fp));
     q_ct1.memcpy(vecb_d, vecb_h, N * sizeof(fp)).wait();
 
-    lworkMat = oneapi::mkl::lapack::getrf_scratchpad_size<fp>(q_ct1, N, N, lda);
-    workMat_d = sycl::malloc_device<fp>(lworkMat, q_ct1);
+    int lwork_geqrf = 0;
+    int lwork_ormqr = 0;
 
-    lworkVec = oneapi::mkl::lapack::getrf_scratchpad_size<fp>(q_ct1, N, N, lda);
-    workVec_d = sycl::malloc_device<fp>(lworkVec, q_ct1);
+    lwork_geqrf = oneapi::mkl::lapack::geqrf_scratchpad_size<fp>(
+        q_ct1, N, N, lda);
+    lwork_ormqr = oneapi::mkl::lapack::ormqr_scratchpad_size<fp>(
+        q_ct1, oneapi::mkl::side::left, oneapi::mkl::transpose::trans, N,
+        1, N, lda, ldb);
+
+    lwork = std::max(lwork_geqrf, lwork_ormqr);
+    work_d = sycl::malloc_device<fp>(lwork, q_ct1);
 
     start = new sycl::event();
     stop = new sycl::event();
@@ -146,17 +132,11 @@ void resources_free()
     delete[] matA_h;
     delete[] vecb_h;
     delete[] resx_h;
-    delete[] LU_h;
 
     sycl::free(matA_d, q_ct1);
     sycl::free(vecb_d, q_ct1);
-    if (pivot_on)
-    {
-        delete[] P_h;
-        sycl::free(P_d, q_ct1);
-    }
-    sycl::free(workMat_d, q_ct1);
-    sycl::free(workVec_d, q_ct1);
+    sycl::free(work_d, q_ct1);
+    sycl::free(tau_d, q_ct1);
 
     dpct::destroy_event(start);
     dpct::destroy_event(stop);
@@ -186,39 +166,28 @@ int main()
     for (int i = 0; i < 10; i++)
     {
         result_reset();
-        /*
-        DPCT1047:1: The meaning of P_d in the oneapi::mkl::lapack::getrf is
-        different from the cusolverDnDgetrf. You may need to check the migrated
-        code.
-        */
         __TIME_BEGIN
-        oneapi::mkl::lapack::getrf(q_ct1, N, N, matA_d, lda,
-                                   P_d, workMat_d, lworkMat);
-        oneapi::mkl::lapack::getrs(
-            q_ct1, oneapi::mkl::transpose::nontrans, N, 1, matA_d,
-            lda, P_d, vecb_d, ldb, workVec_d, lworkVec);
+        // compute QR factorization
+        oneapi::mkl::lapack::geqrf(q_ct1, N, N, matA_d, lda,
+                                   tau_d, work_d, lwork);
+        // compute Q^T*B
+        oneapi::mkl::lapack::ormqr(
+            q_ct1, oneapi::mkl::side::left, oneapi::mkl::transpose::trans,
+            N, 1, N, matA_d, lda, tau_d, vecb_d, ldb,
+            work_d, lwork);
+        // compute x = R \ Q^T*B
+        oneapi::mkl::blas::column_major::trsm(
+            q_ct1, oneapi::mkl::side::left, oneapi::mkl::uplo::upper,
+            oneapi::mkl::transpose::nontrans, oneapi::mkl::diag::nonunit, N, 1,
+            alpha, matA_d, lda, vecb_d, ldb);
         q_ct1.wait();
         __TIME_END
         std::cout << "No. " << i << " run, GPU calculation time = " << elapsedTime << "ms\n";
     }
-    __TIME_BEGIN
-    // std::vector<void *> ws_vec_ct5{workVec_d};
-    // dpct::async_dpct_free(ws_vec_ct5, {event_ct4}, q_ct1);
-    q_ct1.memcpy(LU_h, matA_d, sizeof(fp) * matSize);
+
     q_ct1.memcpy(resx_h, vecb_d, sizeof(fp) * N).wait();
 
 #ifdef SHOW_MATRIX
-    if (pivot_on)
-    {
-        q_ct1.memcpy(P_h, P_d, sizeof(int) * N).wait();
-        std::cout << "pivoting sequence\n";
-        for (int j = 0; j < N; j++)
-        {
-            std::cout << "P_h(" << j << ") = " << P_h[j] << "\n";
-        }
-    }
-    std::cout << "L and U = \n";
-    print_matrix(LU_h, N, N);
     std::cout << "x = \n";
     print_matrix(resx_h, N, 1);
 #endif
