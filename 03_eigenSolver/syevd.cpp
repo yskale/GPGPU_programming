@@ -1,6 +1,5 @@
-// icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core potrf.cpp
-// solve Ax=b, with Cholesky factorization for positive definite Hermitian (symmetry) matrix
-// A = L0*(L0*T), where *T = conjugate transpose
+// icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core syevd.cpp
+// solve Ax=\lambda x, using syevd to compute the spectrum of a dense symmetric (Hermitian) system
 
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
@@ -10,8 +9,6 @@
 
 #include <limits>
 #include <chrono>
-
-#include <thread>
 
 #define __TIME_BEGIN                              \
     start_ct1 = std::chrono::steady_clock::now(); \
@@ -35,20 +32,13 @@ typedef float fp;
 const fp sparselevel = 0.3;
 const int N = 1000;
 constexpr int lda = N;
-constexpr int ldb = N;
 constexpr int matSize = N * N;
 
-int lwork_potrf = 0;        /* size of workspace */
-fp *work_potrf_d = nullptr; /* device workspace for potrf */
-int lwork_potrs = 0;        /* size of workspace */
-fp *work_potrs_d = nullptr; /* device workspace for potrs */
-int *info_d = nullptr;      /* error info */
-int *info_h = nullptr;
-const int info_size = 2;
+int lwork = 0;         /* size of workspace */
+fp *work_d = nullptr;  /* device workspace for potrf */
 
-fp *matA_h, *vecb_h, *resx_h;
-fp *matA_d, *vecb_d;
-fp *L0; /* cholesky factor of A */
+fp *matA_h, *eigenVec_h, *eigenVal_h;
+fp *matA_d, *eigenVal_d;
 
 dpct::event_ptr start, stop;
 std::chrono::time_point<std::chrono::steady_clock> start_ct1;
@@ -86,16 +76,14 @@ void resources_init()
     std::cout << std::endl;
 
     matA_h = new fp[matSize]();
-    vecb_h = new fp[N]();
-    // matA_h = new fp[matSize]{1.0, 2.0, 3.0, 2.0, 5.0, 5.0, 3.0, 5.0, 12.0};
-    // vecb_h = new fp[N]{1.0, 1.0, 1.0};
-    resx_h = new fp[N]();
-    info_h = new int[info_size]();
-    L0 = new fp[matSize]();
+    eigenVec_h = new fp[matSize]();
+    eigenVal_h = new fp[N]();
+    // matA_h = new fp[matSize]{3.5, 0.5, 0.0, 0.5, 3.5, 0.0, 0.0, 0.0, 2.0};
+    // eigenVec_h = new fp[matSize]{0.00, 0.00, 1.00, 0.71, -0.71, 0.00, 0.71, 0.71, 0.00};
+    // eigenVal_h = new fp[N]{2.0, 3.0, 4.0};
 
     matA_d = sycl::malloc_device<fp>(matSize, q_ct1);
-    vecb_d = sycl::malloc_device<fp>(N, q_ct1);
-    info_d = sycl::malloc_device<int>(info_size, q_ct1);
+    eigenVal_d = sycl::malloc_device<fp>(N, q_ct1);
 
     // ======================================================================================
     // create a tmp random matrix
@@ -132,21 +120,15 @@ void resources_init()
     delete[] matTmp_h;
     // ======================================================================================
 
-    for (int i = 0; i < N; i++)
-        vecb_h[i] = rand() / (fp)RAND_MAX * 1.0;
-
-    memset(resx_h, 0, N * sizeof(fp));
+    memset(eigenVec_h, 0, matSize * sizeof(fp));
+    memset(eigenVal_h, 0, N * sizeof(fp));
 
     q_ct1.memcpy(matA_d, matA_h, matSize * sizeof(fp));
-    q_ct1.memcpy(vecb_d, vecb_h, N * sizeof(fp)).wait();
+    q_ct1.memcpy(eigenVal_d, eigenVal_h, N * sizeof(fp)).wait();
 
-    lwork_potrf = oneapi::mkl::lapack::potrf_scratchpad_size<float>(
-        q_ct1, oneapi::mkl::uplo::lower, N, lda);
-    work_potrf_d = sycl::malloc_device<fp>(lwork_potrf, q_ct1);
-
-    lwork_potrs = oneapi::mkl::lapack::potrs_scratchpad_size<float>(
-        q_ct1, oneapi::mkl::uplo::lower, N, 1, lda, ldb);
-    work_potrs_d = sycl::malloc_device<fp>(lwork_potrs, q_ct1);
+    // DPCT1007:0: Migration of cusolverDnDsyevd_bufferSize is not supported.
+    lwork = oneapi::mkl::lapack::syevd_scratchpad_size<fp>(q_ct1, oneapi::mkl::job::vec, oneapi::mkl::uplo::lower, N, lda);
+    work_d = sycl::malloc_device<fp>(lwork, q_ct1);
 
     start = new sycl::event();
     stop = new sycl::event();
@@ -154,31 +136,24 @@ void resources_init()
 #ifdef SHOW_MATRIX
     std::cout << "A = \n";
     print_matrix(matA_h, N, N);
-    std::cout << "b = \n";
-    print_matrix(vecb_h, N, 1);
 #endif
 }
 
 void result_reset()
 {
-    memset(resx_h, 0, N * sizeof(fp));
-    q_ct1.memcpy(matA_d, matA_h, matSize * sizeof(fp));
-    q_ct1.memcpy(vecb_d, vecb_h, N * sizeof(fp)).wait();
+    memset(eigenVal_h, 0, N * sizeof(fp));
+    q_ct1.memcpy(matA_d, matA_h, matSize * sizeof(fp)).wait();
 }
 
 void resources_free()
 {
     delete[] matA_h;
-    delete[] vecb_h;
-    delete[] resx_h;
-    delete[] info_h;
-    delete[] L0;
+    delete[] eigenVec_h;
+    delete[] eigenVal_h;
 
     sycl::free(matA_d, q_ct1);
-    sycl::free(vecb_d, q_ct1);
-    sycl::free(info_d, q_ct1);
-    sycl::free(work_potrf_d, q_ct1);
-    sycl::free(work_potrs_d, q_ct1);
+    sycl::free(eigenVal_d, q_ct1);
+    sycl::free(work_d, q_ct1);
 
     dpct::destroy_event(start);
     dpct::destroy_event(stop);
@@ -186,17 +161,21 @@ void resources_free()
     dev_ct1.reset();
 }
 
-void check_result(fp *matA, fp *resX, fp *vecb, int n)
+void check_result(fp *matA, fp *resX, fp *vecs, int n)
 {
     fp errorNorm = 0.0;
     for (int i = 0; i < n; i++)
     {
+        fp eigVal = resX[i];
+        fp *eigVec = vecs + i * n;
+        // calculate each row of Ax
         fp sum = 0.0;
         for (int j = 0; j < n; j++)
         {
-            sum += matA[j * n + i] * resX[j];
+            sum += matA[j * n + i] * eigVec[j];
         }
-        errorNorm += std::pow<fp, int>((sum - vecb[i]), 2);
+        // calculate norm of Ax - lambda x, should equal 0
+        errorNorm += std::pow<fp, int>((sum - eigVal * eigVec[i]), 2);
     }
     errorNorm = std::pow<fp, fp>(errorNorm, 0.5f);
     std::cout << "error 2-norm = " << errorNorm << std::endl;
@@ -209,41 +188,26 @@ int main()
     {
         result_reset();
         __TIME_BEGIN
-        // Cholesky factorization
-        oneapi::mkl::lapack::potrf(q_ct1, oneapi::mkl::uplo::lower, N,
-                                   matA_d, lda, work_potrf_d,
-                                   lwork_potrf);
-        // solve A*x = b
-        oneapi::mkl::lapack::potrs(
-            q_ct1, oneapi::mkl::uplo::lower, N, 1, matA_d, lda,
-            vecb_d, ldb, work_potrs_d, lwork_potrs);
+
+        // compute spectrum
+        // DPCT1007:2: Migration of cusolverDnDsyevd is not supported.
+        oneapi::mkl::lapack::syevd(q_ct1, oneapi::mkl::job::vec, oneapi::mkl::uplo::lower, N, matA_d, lda, eigenVal_d, work_d, lwork);
+        q_ct1.wait();
         __TIME_END
         std::cout << "No. " << i << " run, GPU calculation time = " << elapsedTime << "ms\n";
     }
 
-    q_ct1.memcpy(L0, matA_d, sizeof(fp) * matSize);
-    q_ct1.memcpy(resx_h, vecb_d, sizeof(fp) * N);
-    q_ct1.memcpy(info_h, info_d, sizeof(int) * info_size).wait();
-
-    for (int i = 0; i < info_size; i++)
-    {
-        if (i == 0 && 2 == info_h[i])
-            std::cout << "Error, Matrix A is not positive definite \n";
-        if (0 > info_h[i])
-        {
-            std::cout << "i = " << i << ", " << -info_h[i] << "-th parameter is wrong \n";
-            exit(i + 1);
-        }
-    }
+    q_ct1.memcpy(eigenVec_h, matA_d, sizeof(fp) * matSize);
+    q_ct1.memcpy(eigenVal_h, eigenVal_d, sizeof(fp) * N).wait();
 
 #ifdef SHOW_MATRIX
-    std::cout << "L0 = (upper triangle doesn't matter, which is same as A) \n";
-    print_matrix(L0, N, N);
-    std::cout << "x = \n";
-    print_matrix(resx_h, N, 1);
+    std::cout << "Eigenvaule = \n";
+    print_matrix(eigenVal_h, N, 1);
+    std::cout << "Eigenvector = \n";
+    print_matrix(eigenVec_h, N, N);
 #endif
 
-    check_result(matA_h, resx_h, vecb_h, N);
+    check_result(matA_h, eigenVal_h, eigenVec_h, N);
 
     resources_free();
     return 0;
