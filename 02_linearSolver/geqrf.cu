@@ -42,11 +42,11 @@ void print_matrix(const fp *arr, int M, int N)
 {
     for (int i = 0; i < M; i++)
     {
-        std::cout << "row " << i << ": ";
+        // std::cout << "row " << i << ": ";
         std::cout << std::fixed;
         for (int j = 0; j < N; j++)
         {
-            std::cout << arr[j * N + i] << " ";
+            std::cout << arr[j * M + i] << " ";
         }
         std::cout << "\n";
     }
