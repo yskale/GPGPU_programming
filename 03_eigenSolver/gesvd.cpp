@@ -32,8 +32,8 @@ typedef float fp;
 #endif
 
 const fp sparselevel = 0.3;
-const int M = 1000; // rows
-const int N = 800;  // cols, N <= M
+const int M = 1000;    // rows
+const int N = 800;     // cols, N <= M
 static_assert(M >= N); // Not required for gesvd in oneMKL, but necessary in cuSolver. Pls modify this code if M < N is used.
 constexpr int lda = M;
 constexpr int matAsize = M * N;
@@ -188,6 +188,7 @@ int main()
         // compute SVD, note here the ldv should equals to M instead of N, otherwise, the check_result is not correct, why ??????
         oneapi::mkl::lapack::gesvd(q_ct1, oneapi::mkl::jobsvd::A, oneapi::mkl::jobsvd::A, M, N,
                                    matA_d, lda, sVal_d, matU_d, lda, matVT_d, lda /*ldv is set to lda*/, work_d, lwork);
+        q_ct1.wait();
         __TIME_END
         std::cout << "No. " << i << " run, GPU calculation time = " << elapsedTime << "ms\n";
     }
