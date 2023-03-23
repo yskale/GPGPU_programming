@@ -34,7 +34,7 @@ typedef float fp;
 const fp sparselevel = 0.3;
 const int M = 1000; // rows
 const int N = 800;  // cols, N <= M
-static_assert(M >= N);
+static_assert(M >= N); // Not required for gesvd in oneMKL, but necessary in cuSolver. Pls modify this code if M < N is used.
 constexpr int lda = M;
 constexpr int matAsize = M * N;
 constexpr int numSVD = std::min(M, N);
