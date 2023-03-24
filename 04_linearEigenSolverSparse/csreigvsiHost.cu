@@ -1,7 +1,6 @@
-// nvcc -arch=sm_70 -lcublas -lcusolver -lcusparse csrlsvchol.cu
-// solve Ax=b, with Cholesky factorization for positive definite Hermitian (symmetry) matrix
-// support both host & device execution, this is device version
-// ref: https://stackoverflow.com/questions/30060067/cusolverspdcsrlsvlu-or-qr-method-using-cuda
+// nvcc -arch=sm_70 -lcublas -lcusolver -lcusparse csreigvsiHost.cu
+// solve Ax=\lambda x, with shift-inverse method, support both host & device execution, this is host version
+// with the initial gussed input, this function caclulate only 1 eigenVal & eigenVec each time
 #include "include/csr.hpp"
 #include <limits>
 
@@ -19,14 +18,16 @@ typedef double fp;
 typedef float fp;
 #endif
 
-const fp sparselevel = 0.5;
-const int N = 1000;
+const fp sparselevel = 0.3;
+const int N = 10;
 constexpr int matSize = N * N;
-fp *matA_h, *vecb_h, *resx_h;
-fp *vecb_d, *resx_d;
+fp *matA_h, *eigenVec_h, eigenVal_h;
+const fp eigenVal_h0 = 0.0; // guessed eigen value
+fp *eigenVec_h0; // guessed eigen vec
 int singularity = 0;
+const int maxIterNum = 1000;
+
 csrMat<fp> csrA_h;
-csrMat<fp> csrA_d;
 cusolverSpHandle_t cusolverH = NULL;
 cusparseMatDescr_t descrA = NULL;
 cudaEvent_t start, stop;
@@ -50,10 +51,8 @@ void print_matrix(const fp *arr, int M, int N)
 void resources_init()
 {
     matA_h = new fp[matSize]();
-    vecb_h = new fp[N]();
-    resx_h = new fp[N]();
-    cudaMalloc((void **)&vecb_d, N * sizeof(fp));
-    cudaMalloc((void **)&resx_d, N * sizeof(fp));
+    eigenVec_h = new fp[N]();
+    eigenVec_h0 = new fp[N]();
 
     // ======================================================================================
     // create a tmp random matrix
@@ -66,6 +65,7 @@ void resources_init()
     }
 
     // create positive definite Hermitian (symmetry) matrix, https://cplusplus.com/forum/general/257711/
+    // <positive definite Hermitian> is not necessary for this case, but random matrix may have coplex eigenvalues
     fp maxVal = std::numeric_limits<fp>::min();
     for (int i = 0; i < N; i++)
     {
@@ -89,9 +89,8 @@ void resources_init()
     }
     delete[] matTmp_h;
     // ======================================================================================
-
     for (int i = 0; i < N; i++)
-        vecb_h[i] = rand() / (fp)RAND_MAX * 1.0;
+        eigenVec_h0[i] = rand() / (fp)RAND_MAX * 1.0;
 
     int numNozeroA = 0;
     for (int i = 0; i < matSize; i++)
@@ -106,11 +105,8 @@ void resources_init()
     csrA_h.printCsrMatrixHost();
     csrA_h.printCsrFormHost();
 #endif
-    csrA_d.init(numNozeroA, N, N, memType::device);
-    csrA_d.copyFromHost(csrA_h);
 
-    memset(resx_h, 0, N * sizeof(fp));
-    cudaMemcpy(vecb_d, vecb_h, N * sizeof(fp), cudaMemcpyHostToDevice);
+    memset(eigenVec_h, 0, N * sizeof(fp));
 
     cusolverSpCreate(&cusolverH);
     cusparseCreateMatDescr(&descrA);
@@ -123,26 +119,19 @@ void resources_init()
 #ifdef SHOW_MATRIX
     std::cout << "A = \n";
     print_matrix(matA_h, N, N);
-    std::cout << "b = \n";
-    print_matrix(vecb_h, N, 1);
 #endif
 }
 
 void result_reset()
 {
-    memset(resx_h, 0, N * sizeof(fp));
-    cudaMemcpy(vecb_d, vecb_h, N * sizeof(fp), cudaMemcpyHostToDevice);
-    csrA_d.copyFromHost(csrA_h);
+    memset(eigenVec_h, 0, N * sizeof(fp));
 }
 
 void resources_free()
 {
     delete[] matA_h;
-    delete[] vecb_h;
-    delete[] resx_h;
-
-    cudaFree(vecb_d);
-    cudaFree(resx_d);
+    delete[] eigenVec_h;
+    delete[] eigenVec_h0;
 
     cusolverSpDestroy(cusolverH);
     cusparseDestroyMatDescr(descrA);
@@ -153,17 +142,19 @@ void resources_free()
     cudaDeviceReset();
 }
 
-void check_result(fp *matA, fp *resX, fp *vecb, int n)
+void check_result(fp *matA, fp eigVal, fp *eigVec, int n)
 {
     fp errorNorm = 0.0;
     for (int i = 0; i < n; i++)
     {
+        // calculate each row of Ax
         fp sum = 0.0;
         for (int j = 0; j < n; j++)
         {
-            sum += matA[j * n + i] * resX[j];
+            sum += matA[j * n + i] * eigVec[j];
         }
-        errorNorm += std::pow<fp, int>((sum - vecb[i]), 2);
+        // calculate norm of Ax - lambda x, should equal 0
+        errorNorm += std::pow<fp, int>((sum - eigVal * eigVec[i]), 2);
     }
     errorNorm = std::pow<fp, fp>(errorNorm, 0.5f);
     std::cout << "error 2-norm = " << errorNorm << std::endl;
@@ -177,23 +168,21 @@ int main()
         result_reset();
         __TIME_BEGIN
 #ifdef DOUBLE_FP_CASE
-        cusolverSpDcsrlsvchol(cusolverH, csrA_d.nA, csrA_d.numA, descrA, csrA_d.csrValA, csrA_d.csrRowPtrA, csrA_d.csrColIndA, vecb_d, 0.0, 0, resx_d, &singularity);
+        cusolverSpDcsreigvsiHost(cusolverH, csrA_h.nA, csrA_h.numA, descrA, csrA_h.csrValA, csrA_h.csrRowPtrA, csrA_h.csrColIndA, eigenVal_h0, eigenVec_h0, maxIterNum, 0.0, &eigenVal_h, eigenVec_h);
 #else
-        cusolverSpScsrlsvchol(cusolverH, csrA_d.nA, csrA_d.numA, descrA, csrA_d.csrValA, csrA_d.csrRowPtrA, csrA_d.csrColIndA, vecb_d, 0.0, 0, resx_d, &singularity);
+        cusolverSpScsreigvsiHost(cusolverH, csrA_h.nA, csrA_h.numA, descrA, csrA_h.csrValA, csrA_h.csrRowPtrA, csrA_h.csrColIndA, eigenVal_h0, eigenVec_h0, maxIterNum, 0.0, &eigenVal_h, eigenVec_h);
 #endif
         __TIME_END
         std::cout << "No. " << i << " run, CPU calculation time = " << elapsedTime << "ms\n";
     }
 
-    cudaMemcpy(resx_h, resx_d, sizeof(fp) * N, cudaMemcpyDeviceToHost);
+    std::cout << "Find an eigenvaule = " << eigenVal_h << std::endl;
 #ifdef SHOW_MATRIX
-    std::cout << "x = \n";
-    print_matrix(resx_h, N, 1);
+    std::cout << "Eigenvector = \n";
+    print_matrix(eigenVec_h, N, 1);
 #endif
-    if (singularity == -1)
-        check_result(matA_h, resx_h, vecb_h, N);
-    else
-        std::cout << "A is not symmetric postive definite, singularity = " << singularity << std::endl;
+
+    check_result(matA_h, eigenVal_h, eigenVec_h, N);
 
     resources_free();
     return 0;

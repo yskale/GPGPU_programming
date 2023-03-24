@@ -1,7 +1,9 @@
-// nvcc -arch=sm_70 -lcublas -lcusolver -lcusparse csrlsvqr.cu
-// solve Ax=b, with QR factorization, support both host & device execution, this is device version
+// nvcc -arch=sm_70 -lcublas -lcusolver -lcusparse csrlsvchol.cu
+// solve Ax=b, with Cholesky factorization for positive definite Hermitian (symmetry) matrix
+// support both host & device execution, this is device version
 // ref: https://stackoverflow.com/questions/30060067/cusolverspdcsrlsvlu-or-qr-method-using-cuda
 #include "include/csr.hpp"
+#include <limits>
 
 #define __TIME_BEGIN cudaEventRecord(start);
 #define __TIME_END              \
@@ -17,7 +19,7 @@ typedef double fp;
 typedef float fp;
 #endif
 
-const fp sparselevel = 0.3;
+const fp sparselevel = 0.5;
 const int N = 1000;
 constexpr int matSize = N * N;
 fp *matA_h, *vecb_h, *resx_h;
@@ -53,12 +55,40 @@ void resources_init()
     cudaMalloc((void **)&vecb_d, N * sizeof(fp));
     cudaMalloc((void **)&resx_d, N * sizeof(fp));
 
+    // ======================================================================================
+    // create a tmp random matrix
+    fp *matTmp_h = new fp[matSize]();
     for (int i = 0; i < matSize; i++)
     {
-        matA_h[i] = rand() / (fp)RAND_MAX * 1.0;
+        matTmp_h[i] = rand() / (fp)RAND_MAX * 1.0;
         if (rand() / (fp)RAND_MAX * 1.0 < sparselevel) // make the matrix become sparse
-            matA_h[i] = 0.0;
+            matTmp_h[i] = 0.0;
     }
+
+    // create positive definite Hermitian (symmetry) matrix, https://cplusplus.com/forum/general/257711/
+    fp maxVal = std::numeric_limits<fp>::min();
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            matA_h[j * N + i] = 0;
+            for (int k = 0; k < N; k++)
+            {
+                matA_h[j * N + i] += matTmp_h[k * N + i] * matTmp_h[k * N + j];
+            }
+            maxVal = std::max(maxVal, matA_h[j * N + i]);
+        }
+    }
+    // normalization
+    for (int i = 0; i < N; i++)
+    {
+        for (int j = 0; j < N; j++)
+        {
+            matA_h[j * N + i] /= maxVal;
+        }
+    }
+    delete[] matTmp_h;
+    // ======================================================================================
 
     for (int i = 0; i < N; i++)
         vecb_h[i] = rand() / (fp)RAND_MAX * 1.0;
@@ -147,12 +177,12 @@ int main()
         result_reset();
         __TIME_BEGIN
 #ifdef DOUBLE_FP_CASE
-        cusolverSpDcsrlsvqr(cusolverH, csrA_d.nA, csrA_d.numA, descrA, csrA_d.csrValA, csrA_d.csrRowPtrA, csrA_d.csrColIndA, vecb_d, 0.0, 0, resx_d, &singularity);
+        cusolverSpDcsrlsvchol(cusolverH, csrA_d.nA, csrA_d.numA, descrA, csrA_d.csrValA, csrA_d.csrRowPtrA, csrA_d.csrColIndA, vecb_d, 0.0, 0, resx_d, &singularity);
 #else
-        cusolverSpScsrlsvqr(cusolverH, csrA_d.nA, csrA_d.numA, descrA, csrA_d.csrValA, csrA_d.csrRowPtrA, csrA_d.csrColIndA, vecb_d, 0.0, 0, resx_d, &singularity);
+        cusolverSpScsrlsvchol(cusolverH, csrA_d.nA, csrA_d.numA, descrA, csrA_d.csrValA, csrA_d.csrRowPtrA, csrA_d.csrColIndA, vecb_d, 0.0, 0, resx_d, &singularity);
 #endif
         __TIME_END
-        std::cout << "No. " << i << " run, CPU calculation time = " << elapsedTime << "ms\n";
+        std::cout << "No. " << i << " run, GPU calculation time = " << elapsedTime << "ms\n";
     }
 
     cudaMemcpy(resx_h, resx_d, sizeof(fp) * N, cudaMemcpyDeviceToHost);
@@ -160,10 +190,10 @@ int main()
     std::cout << "x = \n";
     print_matrix(resx_h, N, 1);
 #endif
-    if(singularity == -1)
+    if (singularity == -1)
         check_result(matA_h, resx_h, vecb_h, N);
     else
-        std::cout << "A is uninvertible, singularity = " << singularity << std::endl;
+        std::cout << "A is not symmetric postive definite, singularity = " << singularity << std::endl;
 
     resources_free();
     return 0;
