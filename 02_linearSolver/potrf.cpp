@@ -1,5 +1,5 @@
 // icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core potrf.cpp
-// clang++ -fsycl -I${MKLROOT}/include -L${MKLROOT}/lib -lonemkl -lonemkl_blas_mklcpu -lonemkl_blas_mklgpu -lonemkl_lapack_mklcpu -lonemkl_lapack_mklgpu potrf.cpp
+// clang++ -fsycl -I${MKLROOT}/include -L${MKLROOT}/lib -lonemkl -lonemkl_blas_mklcpu -lonemkl_blas_mklgpu -lonemkl_lapack_mklcpu -lonemkl_lapack_mklgpu -O1 potrf.cpp
 // clang++ -fsycl -fsycl-targets=nvptx64-nvidia-cuda -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_70 -I${MKLROOT}/include -L${MKLROOT}/lib -lonemkl -lonemkl_blas_cublas -lonemkl_lapack_cusolver potrf.cpp
 // solve Ax=b, with Cholesky factorization for positive definite Hermitian (symmetry) matrix
 // A = L0*(L0*T), where *T = conjugate transpose
