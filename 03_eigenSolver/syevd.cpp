@@ -1,11 +1,13 @@
 // icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core syevd.cpp
+// clang++ -fsycl -I${MKLROOT}/include -L${MKLROOT}/lib -lonemkl -lonemkl_blas_mklcpu -lonemkl_blas_mklgpu -lonemkl_lapack_mklcpu -lonemkl_lapack_mklgpu syevd.cpp
+// clang++ -fsycl -fsycl-targets=nvptx64-nvidia-cuda -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_70 -I${MKLROOT}/include -L${MKLROOT}/lib -lonemkl -lonemkl_blas_cublas -lonemkl_lapack_cusolver syevd.cpp
 // solve Ax=\lambda x, using syevd to compute the spectrum of a dense symmetric (Hermitian) system
 
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include <iostream>
 #include <oneapi/mkl.hpp>
-#include <dpct/blas_utils.hpp>
+// #include <dpct/blas_utils.hpp>
 
 #include <limits>
 #include <chrono>

@@ -1,10 +1,12 @@
 // icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core geqrf.cpp
+// clang++ -fsycl -I${MKLROOT}/include -L${MKLROOT}/lib -lonemkl -lonemkl_blas_mklcpu -lonemkl_blas_mklgpu -lonemkl_lapack_mklcpu -lonemkl_lapack_mklgpu geqrf.cpp
+// clang++ -fsycl -fsycl-targets=nvptx64-nvidia-cuda -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_70 -I${MKLROOT}/include -L${MKLROOT}/lib -lonemkl -lonemkl_blas_cublas -lonemkl_lapack_cusolver geqrf.cpp
 // solve Ax=b, with QR factorization
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include <iostream>
 #include <oneapi/mkl.hpp>
-#include <dpct/blas_utils.hpp>
+// #include <dpct/blas_utils.hpp>
 
 #include <chrono>
 

@@ -8,7 +8,7 @@
 #include <dpct/dpct.hpp>
 #include <iostream>
 #include <oneapi/mkl.hpp>
-#include <dpct/blas_utils.hpp>
+// #include <dpct/blas_utils.hpp>
 #include <limits>
 #include <chrono>
 

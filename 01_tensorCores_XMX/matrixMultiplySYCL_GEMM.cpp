@@ -6,11 +6,13 @@
 // haowei.zhang@intel.com
 
 // transfer from CUDA with DPCT: dpct --in-root=. --cuda-include-path=/usr/local/cuda-11.7/include matrixMultiplyCUDA.cu
-// run on CPU
+// run on CPU, Intel & NVIDIA GPU
 // icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core matrixMultiplySYCL_GEMM.cpp
 // icpx -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core -fiopenmp -fopenmp-targets=spir64 matrixMultiplySYCL_GEMM.cpp
 // clang++ -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core matrixMultiplySYCL_GEMM.cpp
 // clang++ -fsycl -lmkl_sycl -lmkl_intel_ilp64 -lmkl_sequential -lmkl_core -fiopenmp -fopenmp-targets=spir64 matrixMultiplySYCL_GEMM.cpp
+// clang++ -fsycl -I${MKLROOT}/include -L${MKLROOT}/lib -lonemkl -lonemkl_blas_mklcpu -lonemkl_blas_mklgpu -lonemkl_lapack_mklcpu -lonemkl_lapack_mklgpu matrixMultiplySYCL_GEMM.cpp
+// clang++ -fsycl -fsycl-targets=nvptx64-nvidia-cuda -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=sm_70 -I${MKLROOT}/include -L${MKLROOT}/lib -lonemkl -lonemkl_blas_cublas -lonemkl_lapack_cusolver matrixMultiplySYCL_GEMM.cpp
 #include <sycl/sycl.hpp>
 #include <dpct/dpct.hpp>
 #include <iostream>
@@ -18,8 +20,8 @@
 #include <cmath>
 #include <cstring>
 #include <oneapi/mkl.hpp>
-#include <dpct/blas_utils.hpp>
-#include <dpct/lib_common_utils.hpp>
+// #include <dpct/blas_utils.hpp>
+// #include <dpct/lib_common_utils.hpp>
 
 /*
 DPCT1012:4: Detected kernel execution time measurement pattern and generated an
@@ -304,12 +306,15 @@ void warmupGpu(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int N)
     float alpha = 1.0f;
     float beta = 0.0f;
 
-    dpct::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
-               oneapi::mkl::transpose::nontrans, N, M, K, &alpha, arrB,
-               dpct::library_data_t::real_float, N, arrA,
-               dpct::library_data_t::real_float, K, &beta, arrC,
-               dpct::library_data_t::real_float, N,
-               dpct::library_data_t::real_float);
+    // dpct::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
+    //            oneapi::mkl::transpose::nontrans, N, M, K, &alpha, arrB,
+    //            dpct::library_data_t::real_float, N, arrA,
+    //            dpct::library_data_t::real_float, K, &beta, arrC,
+    //            dpct::library_data_t::real_float, N,
+    //            dpct::library_data_t::real_float);
+    oneapi::mkl::blas::column_major::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
+                            oneapi::mkl::transpose::nontrans,
+                            N, M, K, alpha, arrB, N, arrA, K, beta, arrC, N);
     q_ct1.wait();
     result_reset();
 
@@ -679,15 +684,15 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
     transpose = false;
     for (int i = 0; i < N_REPEAT; i++)
     {
-        dpct::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
-                   oneapi::mkl::transpose::nontrans, N, M, K, &alpha, arrB,
-                   dpct::library_data_t::real_float, N, arrA,
-                   dpct::library_data_t::real_float, K, &beta, arrC,
-                   dpct::library_data_t::real_float, N,
-                   dpct::library_data_t::real_float);
-        // oneapi::mkl::blas::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
-        //                         oneapi::mkl::transpose::nontrans,
-        //                         N, M, K, alpha, arrB, N, arrA, K, beta, arrC, N);
+        // dpct::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
+        //            oneapi::mkl::transpose::nontrans, N, M, K, &alpha, arrB,
+        //            dpct::library_data_t::real_float, N, arrA,
+        //            dpct::library_data_t::real_float, K, &beta, arrC,
+        //            dpct::library_data_t::real_float, N,
+        //            dpct::library_data_t::real_float);
+        oneapi::mkl::blas::column_major::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
+                                oneapi::mkl::transpose::nontrans,
+                                N, M, K, alpha, arrB, N, arrA, K, beta, arrC, N);
     }
     q_ct1.wait();
     __TIME_END
