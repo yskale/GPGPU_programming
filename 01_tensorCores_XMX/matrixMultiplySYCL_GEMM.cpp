@@ -693,6 +693,9 @@ void multiplyGpuGemm(const fp *arrA, const fp *arrB, fp *arrC, int M, int K, int
         oneapi::mkl::blas::column_major::gemm(q_ct1, oneapi::mkl::transpose::nontrans,
                                 oneapi::mkl::transpose::nontrans,
                                 N, M, K, alpha, arrB, N, arrA, K, beta, arrC, N);
+        // oneapi::mkl::blas::row_major::gemm(q_ct1, oneapi::mkl::transpose::nontrans, 
+        //                         oneapi::mkl::transpose::nontrans, M, N, K, 
+        //                         alpha, arrA, K, arrB, N, beta, arrC, N);
     }
     q_ct1.wait();
     __TIME_END
